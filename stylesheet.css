@@ -1,0 +1,13 @@
+/* https://github.com/GNOME/gnome-shell/blob/main/data/theme/gnome-shell-sass/widgets/_panel.scss */
+/* Background color is set as an inline style on #panel from extension.js. */
+
+#panel.panel-color-matcher-light * { color: rgba(0, 0, 0, 0.9); }
+#panel.panel-color-matcher-light .workspace-dot { background-color: rgba(0, 0, 0, 0.9); }
+
+#panel.panel-color-matcher-dark * { color: rgba(255, 255, 255, 0.9); }
+#panel.panel-color-matcher-dark .workspace-dot { background-color: rgba(255, 255, 255, 0.9); }
+
+#panel.panel-color-matcher-light:overview *,
+#panel.panel-color-matcher-dark:overview * { color: white; }
+#panel.panel-color-matcher-light:overview .workspace-dot,
+#panel.panel-color-matcher-dark:overview .workspace-dot { background-color: white; }

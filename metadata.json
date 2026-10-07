@@ -4,5 +4,6 @@
   "uuid": "panel-color-matcher@otsaloma.io",
   "shell-version": ["49", "50"],
   "url": "https://github.com/otsaloma/panel-color-matcher",
+  "settings-schema": "org.gnome.shell.extensions.panel-color-matcher",
   "donations": {"paypal": "otsaloma"}
 }

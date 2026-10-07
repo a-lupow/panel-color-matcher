@@ -14,6 +14,11 @@ install:
 	mkdir -p $(INSTALL_DIR)
 	cp -f extension.js $(INSTALL_DIR)
 	cp -f metadata.json $(INSTALL_DIR)
+	cp -f prefs.js $(INSTALL_DIR)
+	cp -f stylesheet.css $(INSTALL_DIR)
+	mkdir -p $(INSTALL_DIR)/schemas
+	cp -f schemas/*.gschema.xml $(INSTALL_DIR)/schemas
+	glib-compile-schemas $(INSTALL_DIR)/schemas
 
 pack:
 	$(MAKE) check clean

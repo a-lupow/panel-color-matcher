@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.panel-color-matcher"
+          path="/org/gnome/shell/extensions/panel-color-matcher/">
+    <key name="opacity" type="i">
+      <range min="0" max="100"/>
+      <default>100</default>
+      <summary>Panel background opacity</summary>
+      <description>Opacity of the matched panel background color, in percent.</description>
+    </key>
+  </schema>
+</schemalist>

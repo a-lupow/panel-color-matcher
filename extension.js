@@ -1,23 +1,15 @@
 // -*- coding: utf-8-unix -*-
-/* globals TextEncoder */
 
 import Gio from "gi://Gio";
 import GLib from "gi://GLib";
 import Shell from "gi://Shell";
-import St from "gi://St";
 
 import * as Main from "resource:///org/gnome/shell/ui/main.js";
 import {Extension} from "resource:///org/gnome/shell/extensions/extension.js";
 
-// https://github.com/GNOME/gnome-shell/blob/main/data/theme/gnome-shell-sass/widgets/_panel.scss
-const PANEL_CSS = (bg, fg) => `
-#panel { background-color: ${bg}; }
-#panel * { color: ${fg}; }
-#panel .workspace-dot { background-color: ${fg}; }
-#panel:overview { background-color: transparent; }
-#panel:overview * { color: white; }
-#panel:overview .workspace-dot { background-color: white; }
-`.trim();
+// Foreground colors are defined for these classes in stylesheet.css.
+const LIGHT_CLASS = "panel-color-matcher-light";
+const DARK_CLASS = "panel-color-matcher-dark";
 
 export default class PanelColorMatcher extends Extension {
 
@@ -36,26 +28,52 @@ export default class PanelColorMatcher extends Extension {
             "unminimize",       () => this._updateDelayed(),
             this);
 
-        this._stylesheet = Gio.File.new_for_path(`/tmp/${this.uuid}.css`);
-        this._stylesheetText = null;
+        // An inline style overrides the theme's transparent #panel:overview,
+        // so drop the background while the overview is shown.
+        Main.overview.connectObject(
+            "showing", () => this._setOverviewShowing(true),
+            "hiding",  () => this._setOverviewShowing(false),
+            // Samples taken while the overview was visible captured its
+            // backdrop, so resample once the desktop is back on screen.
+            "hidden",  () => this._updateDelayed(),
+            this);
+
+        // The shell crossfades to a new wallpaper over about a second
+        // (FADE_ANIMATION_TIME in background.js), so wait for it to finish.
+        this._backgroundSettings = new Gio.Settings({schema_id: "org.gnome.desktop.background"});
+        this._backgroundSettings.connectObject(
+            "changed", () => this._updateDelayed(1500),
+            this);
+
+        this._settings = this.getSettings();
+        this._settings.connectObject(
+            "changed::opacity", () => this._syncBackground(),
+            this);
+
+        this._enabled = true;
+        this._bg = null;
+        this._overviewShowing = Main.overview.visible;
         this._updateTimeout = null;
         this._update();
     }
 
     disable() {
+        this._enabled = false;
         global.display.disconnectObject(this);
         global.window_manager.disconnectObject(this);
+        Main.overview.disconnectObject(this);
+        this._backgroundSettings.disconnectObject(this);
+        this._backgroundSettings = null;
+        this._settings.disconnectObject(this);
+        this._settings = null;
         if (this._updateTimeout) {
             GLib.source_remove(this._updateTimeout);
             this._updateTimeout = null;
         }
-        if (this._stylesheetText) {
-            const theme = St.ThemeContext.get_for_stage(global.stage).get_theme();
-            theme.unload_stylesheet(this._stylesheet);
-            this._stylesheet.delete(null);
-        }
-        this._stylesheet = null;
-        this._stylesheetText = null;
+        Main.panel.set_style(null);
+        Main.panel.remove_style_class_name(LIGHT_CLASS);
+        Main.panel.remove_style_class_name(DARK_CLASS);
+        this._bg = null;
     }
 
     async _sampleColor(x, y) {
@@ -82,23 +100,31 @@ export default class PanelColorMatcher extends Extension {
         return {r: pixels[0], g: pixels[1], b: pixels[2]};
     }
 
-    _applyStyle(bg, fg) {
-        const stylesheetText = PANEL_CSS(bg, fg);
-        if (stylesheetText === this._stylesheetText) return;
-        const theme = St.ThemeContext.get_for_stage(global.stage).get_theme();
-        if (this._stylesheetText) theme.unload_stylesheet(this._stylesheet);
-        this._stylesheet.replace_contents(
-            new TextEncoder().encode(stylesheetText),
-            null,
-            false,
-            Gio.FileCreateFlags.NONE,
-            null
-        );
-        this._stylesheetText = stylesheetText;
-        theme.load_stylesheet(this._stylesheet);
+    _applyStyle(bg, light) {
+        // Restyle only the panel subtree instead of reloading the theme,
+        // which would restyle the whole stage. The theme's transition-duration
+        // on #panel and .panel-button makes St crossfade the change.
+        Main.panel.add_style_class_name(light ? LIGHT_CLASS : DARK_CLASS);
+        Main.panel.remove_style_class_name(light ? DARK_CLASS : LIGHT_CLASS);
+        if (bg === this._bg) return;
+        this._bg = bg;
+        this._syncBackground();
+    }
+
+    _setOverviewShowing(showing) {
+        this._overviewShowing = showing;
+        this._syncBackground();
+    }
+
+    _syncBackground() {
+        if (!this._bg || this._overviewShowing)
+            return Main.panel.set_style(null);
+        const opacity = this._settings.get_int("opacity") / 100;
+        Main.panel.set_style(`background-color: rgba(${this._bg}, ${opacity});`);
     }
 
     _update() {
+        if (Main.overview.visible) return;
         const index = global.display.get_primary_monitor();
         const monitor = global.display.get_monitor_geometry(index);
         // Sample at 25% and 75% to detect half-maximized windows.
@@ -109,6 +135,9 @@ export default class PanelColorMatcher extends Extension {
             this._sampleColor(x1, y),
             this._sampleColor(x2, y),
         ]).then(([color1, color2]) => {
+            if (!this._enabled) return;
+            // Don't adopt the overview's backdrop as the panel color.
+            if (Main.overview.visible) return;
             // In case one window is half-maximized either on the left or the
             // right side, find the side where the color is lightest or darkest,
             // since windows tend to be either light or dark and wallpapers
@@ -118,17 +147,16 @@ export default class PanelColorMatcher extends Extension {
             const distance = c => Math.abs(c.r-155) + Math.abs(c.g-155) + Math.abs(c.b-155);
             const color = distance(color1) > distance(color2) ? color1 : color2;
             const luminance = 0.299 * color.r + 0.587 * color.g + 0.114 * color.b;
-            const bg = `rgb(${color.r}, ${color.g}, ${color.b})`;
-            const fg = luminance > 128 ? "rgba(0, 0, 0, 0.9)" : "rgba(255, 255, 255, 0.9)";
-            this._applyStyle(bg, fg);
+            const bg = `${color.r}, ${color.g}, ${color.b}`;
+            this._applyStyle(bg, luminance > 128);
         }).catch(e => {
             console.error("Color sampling failed:", e);
         });
     }
 
-    _updateDelayed() {
+    _updateDelayed(delay = 500) {
         this._updateTimeout && GLib.source_remove(this._updateTimeout);
-        this._updateTimeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 500, () => {
+        this._updateTimeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, delay, () => {
             this._update();
             this._updateTimeout = null;
             return GLib.SOURCE_REMOVE;
