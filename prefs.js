@@ -24,6 +24,42 @@ export default class PanelColorMatcherPreferences extends ExtensionPreferences {
         });
         settings.bind("opacity", row, "value", Gio.SettingsBindFlags.DEFAULT);
         group.add(row);
+        const maximizedRow = new Adw.SpinRow({
+            title: "Opacity with Maximized Windows",
+            subtitle: "Panel background opacity in percent while a window is maximized or fullscreen",
+            adjustment: new Gtk.Adjustment({
+                lower: 0,
+                upper: 100,
+                step_increment: 5,
+                page_increment: 10,
+            }),
+        });
+        settings.bind("maximized-opacity", maximizedRow, "value", Gio.SettingsBindFlags.DEFAULT);
+        group.add(maximizedRow);
+        const compensateRow = new Adw.SwitchRow({
+            title: "Compensate Brightness",
+            subtitle: "Darken the panel color as opacity decreases",
+        });
+        settings.bind("compensate-brightness", compensateRow, "active", Gio.SettingsBindFlags.DEFAULT);
+        group.add(compensateRow);
+        const contrastRow = new Adw.SpinRow({
+            title: "Text Contrast",
+            subtitle: "How strongly bright colors are darkened for the white text, in percent",
+            adjustment: new Gtk.Adjustment({
+                lower: 0,
+                upper: 100,
+                step_increment: 5,
+                page_increment: 10,
+            }),
+        });
+        settings.bind("text-contrast", contrastRow, "value", Gio.SettingsBindFlags.DEFAULT);
+        group.add(contrastRow);
+        const debugRow = new Adw.SwitchRow({
+            title: "Debug Logging",
+            subtitle: "Log sampled colors to the system journal",
+        });
+        settings.bind("debug", debugRow, "active", Gio.SettingsBindFlags.DEFAULT);
+        group.add(debugRow);
         page.add(group);
         window.add(page);
     }

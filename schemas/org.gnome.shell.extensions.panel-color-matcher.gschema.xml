@@ -8,5 +8,27 @@
       <summary>Panel background opacity</summary>
       <description>Opacity of the matched panel background color, in percent.</description>
     </key>
+    <key name="maximized-opacity" type="i">
+      <range min="0" max="100"/>
+      <default>100</default>
+      <summary>Panel background opacity with maximized windows</summary>
+      <description>Opacity of the panel background, in percent, while a maximized or fullscreen window is on the primary monitor.</description>
+    </key>
+    <key name="compensate-brightness" type="b">
+      <default>false</default>
+      <summary>Compensate brightness for opacity</summary>
+      <description>Darken the panel color as opacity decreases, so a translucent panel keeps its contrast.</description>
+    </key>
+    <key name="text-contrast" type="i">
+      <range min="0" max="100"/>
+      <default>100</default>
+      <summary>Text contrast strength</summary>
+      <description>How strongly bright colors are darkened to keep the white panel text readable, in percent. 0 disables it; 100 enforces 4.5:1 contrast.</description>
+    </key>
+    <key name="debug" type="b">
+      <default>false</default>
+      <summary>Debug logging</summary>
+      <description>Log sampled colors and overview events to the journal.</description>
+    </key>
   </schema>
 </schemalist>
