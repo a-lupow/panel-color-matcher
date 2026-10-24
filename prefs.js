@@ -12,48 +12,31 @@ export default class PanelColorMatcherPreferences extends ExtensionPreferences {
         const settings = this.getSettings();
         const page = new Adw.PreferencesPage();
         const group = new Adw.PreferencesGroup();
-        const row = new Adw.SpinRow({
-            title: "Opacity",
-            subtitle: "Panel background opacity in percent",
-            adjustment: new Gtk.Adjustment({
-                lower: 0,
-                upper: 100,
-                step_increment: 5,
-                page_increment: 10,
-            }),
-        });
-        settings.bind("opacity", row, "value", Gio.SettingsBindFlags.DEFAULT);
-        group.add(row);
-        const maximizedRow = new Adw.SpinRow({
-            title: "Opacity with Maximized Windows",
-            subtitle: "Panel background opacity in percent while a window is maximized or fullscreen",
-            adjustment: new Gtk.Adjustment({
-                lower: 0,
-                upper: 100,
-                step_increment: 5,
-                page_increment: 10,
-            }),
-        });
-        settings.bind("maximized-opacity", maximizedRow, "value", Gio.SettingsBindFlags.DEFAULT);
-        group.add(maximizedRow);
+        const addPercentRow = (key, title, subtitle) => {
+            const row = new Adw.SpinRow({
+                title,
+                subtitle,
+                adjustment: new Gtk.Adjustment({
+                    lower: 0,
+                    upper: 100,
+                    step_increment: 5,
+                    page_increment: 10,
+                }),
+            });
+            settings.bind(key, row, "value", Gio.SettingsBindFlags.DEFAULT);
+            group.add(row);
+        };
+        addPercentRow("opacity", "Opacity", "Panel background opacity in percent");
+        addPercentRow("maximized-opacity", "Opacity with Maximized Windows",
+                      "Panel background opacity in percent while a window is maximized or fullscreen");
         const compensateRow = new Adw.SwitchRow({
             title: "Compensate Brightness",
             subtitle: "Darken the panel color as opacity decreases",
         });
         settings.bind("compensate-brightness", compensateRow, "active", Gio.SettingsBindFlags.DEFAULT);
         group.add(compensateRow);
-        const contrastRow = new Adw.SpinRow({
-            title: "Text Contrast",
-            subtitle: "How strongly bright colors are darkened for the white text, in percent",
-            adjustment: new Gtk.Adjustment({
-                lower: 0,
-                upper: 100,
-                step_increment: 5,
-                page_increment: 10,
-            }),
-        });
-        settings.bind("text-contrast", contrastRow, "value", Gio.SettingsBindFlags.DEFAULT);
-        group.add(contrastRow);
+        addPercentRow("text-contrast", "Text Contrast",
+                      "How strongly bright colors are darkened for the white text, in percent");
         const debugRow = new Adw.SwitchRow({
             title: "Debug Logging",
             subtitle: "Log sampled colors to the system journal",
