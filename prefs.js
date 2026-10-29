@@ -37,6 +37,12 @@ export default class PanelColorMatcherPreferences extends ExtensionPreferences {
         group.add(compensateRow);
         addPercentRow("text-contrast", "Text Contrast",
                       "How strongly bright colors are darkened for the white text, in percent");
+        const accentRow = new Adw.SwitchRow({
+            title: "Accent Color from Wallpaper",
+            subtitle: "Set the system accent color to the closest match to the wallpaper",
+        });
+        settings.bind("wallpaper-accent", accentRow, "active", Gio.SettingsBindFlags.DEFAULT);
+        group.add(accentRow);
         const debugRow = new Adw.SwitchRow({
             title: "Debug Logging",
             subtitle: "Log sampled colors to the system journal",

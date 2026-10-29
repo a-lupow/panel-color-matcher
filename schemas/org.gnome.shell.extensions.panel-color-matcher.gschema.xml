@@ -25,6 +25,16 @@
       <summary>Text contrast strength</summary>
       <description>How strongly bright colors are darkened to keep the white panel text readable, in percent. 0 disables it; 100 enforces 4.5:1 contrast.</description>
     </key>
+    <key name="wallpaper-accent" type="b">
+      <default>true</default>
+      <summary>Accent color from wallpaper</summary>
+      <description>Set the system accent color to the one closest to the wallpaper's most prominent hue.</description>
+    </key>
+    <key name="saved-accent" type="s">
+      <default>""</default>
+      <summary>Saved accent color</summary>
+      <description>The user's own accent color, restored when the wallpaper accent is turned off. Empty when nothing is saved.</description>
+    </key>
     <key name="debug" type="b">
       <default>false</default>
       <summary>Debug logging</summary>

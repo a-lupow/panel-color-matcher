@@ -49,3 +49,87 @@ export function panelColor(bg, opacity, compensate, strength) {
 
   return [r, g, b];
 }
+
+// libadwaita's accent colors, except slate, the fallback for gray images.
+const ACCENTS = {
+  blue: [0x35, 0x84, 0xe4],
+  teal: [0x21, 0x90, 0xa4],
+  green: [0x3a, 0x94, 0x4a],
+  yellow: [0xc8, 0x88, 0x00],
+  orange: [0xed, 0x5b, 0x00],
+  red: [0xe6, 0x2d, 0x42],
+  pink: [0xd5, 0x61, 0x99],
+  purple: [0x91, 0x41, 0xac],
+};
+
+// Hue in degrees, saturation and value (0-1) of an RGB color.
+function hsv(r, g, b) {
+  const max = Math.max(r, g, b);
+  const d = max - Math.min(r, g, b);
+
+  if (d === 0) {
+    return [0, 0, max / 255];
+  }
+
+  let h = 0;
+
+  if (max === r) {
+    h = ((g - b) / d + 6) % 6;
+  } else if (max === g) {
+    h = (b - r) / d + 2;
+  } else {
+    h = (r - g) / d + 4;
+  }
+
+  return [h * 60, d / max, max / 255];
+}
+
+const ACCENT_HUES = Object.entries(ACCENTS).map(([name, rgb]) => [name, hsv(...rgb)[0]]);
+
+// Return the accent-color name closest to the image's most prominent hue.
+// pixels is RGB(A) bytes, with channels per pixel and rowstride per row.
+export function accentFromPixels(pixels, width, height, channels, rowstride) {
+  const weights = {};
+  let total = 0;
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = y * rowstride + x * channels;
+      const [h, s, v] = hsv(pixels[i], pixels[i + 1], pixels[i + 2]);
+
+      // Dark and grayish pixels carry no hue worth matching.
+      if (s < 0.25 || v < 0.2) {
+        continue;
+      }
+
+      let best = null;
+      let bestDistance = Infinity;
+
+      for (const [name, hue] of ACCENT_HUES) {
+        const diff = Math.abs(h - hue);
+        const distance = Math.min(diff, 360 - diff);
+
+        if (distance < bestDistance) {
+          best = name;
+          bestDistance = distance;
+        }
+      }
+
+      weights[best] = (weights[best] ?? 0) + s * v;
+      total += s * v;
+    }
+  }
+
+  // An image with little color gets the neutral accent.
+  if (total < 0.05 * width * height) {
+    return "slate";
+  }
+
+  return Object.keys(weights).reduce((a, b) => {
+    if (weights[b] > weights[a]) {
+      return b;
+    }
+
+    return a;
+  });
+}
