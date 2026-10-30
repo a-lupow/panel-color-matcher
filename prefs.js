@@ -25,10 +25,22 @@ export default class PanelColorMatcherPreferences extends ExtensionPreferences {
             });
             settings.bind(key, row, "value", Gio.SettingsBindFlags.DEFAULT);
             group.add(row);
+
+            return row;
         };
         addPercentRow("opacity", "Opacity", "Panel background opacity in percent");
         addPercentRow("maximized-opacity", "Opacity with Maximized Windows",
                       "Panel background opacity in percent while a window is maximized or fullscreen");
+        const gradientRow = new Adw.SwitchRow({
+            title: "Gradient",
+            subtitle: "Fade the background from the opacity above at the top to the opacity below at the bottom, " +
+                      "except while a window is maximized or fullscreen",
+        });
+        settings.bind("gradient", gradientRow, "active", Gio.SettingsBindFlags.DEFAULT);
+        group.add(gradientRow);
+        const gradientOpacityRow = addPercentRow("gradient-opacity", "Gradient Bottom Opacity",
+                                                 "Panel background opacity in percent at the bottom edge");
+        settings.bind("gradient", gradientOpacityRow, "sensitive", Gio.SettingsBindFlags.GET);
         const compensateRow = new Adw.SwitchRow({
             title: "Compensate Brightness",
             subtitle: "Darken the panel color as opacity decreases",

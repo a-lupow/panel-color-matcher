@@ -14,6 +14,17 @@
       <summary>Panel background opacity with maximized windows</summary>
       <description>Opacity of the panel background, in percent, while a maximized or fullscreen window is on the primary monitor.</description>
     </key>
+    <key name="gradient" type="b">
+      <default>false</default>
+      <summary>Gradient background</summary>
+      <description>Fade the panel background vertically from the opacity at the top edge to the gradient bottom opacity at the bottom edge, letting a blur behind the panel show through. A maximized or fullscreen window on the primary monitor turns it off.</description>
+    </key>
+    <key name="gradient-opacity" type="i">
+      <range min="0" max="100"/>
+      <default>0</default>
+      <summary>Gradient bottom opacity</summary>
+      <description>Opacity of the panel background at its bottom edge, in percent, while the gradient is on.</description>
+    </key>
     <key name="compensate-brightness" type="b">
       <default>false</default>
       <summary>Compensate brightness for opacity</summary>

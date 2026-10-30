@@ -1,8 +1,11 @@
 // -*- coding: utf-8-unix -*-
 
+import Clutter from "gi://Clutter";
+import Cogl from "gi://Cogl";
 import GdkPixbuf from "gi://GdkPixbuf";
 import Gio from "gi://Gio";
 import GLib from "gi://GLib";
+import GObject from "gi://GObject";
 import Shell from "gi://Shell";
 
 import * as Main from "resource:///org/gnome/shell/ui/main.js";
@@ -18,6 +21,47 @@ Gio._promisify(Shell.Screenshot.prototype, "pick_color");
 // Changing the accent restyles the shell and every app, which stutters
 // whatever is moving, so wait for this long without input first.
 const ACCENT_IDLE_TIME = 2000;
+
+// Blur my Shell's panel blur actors, see components/panel/panel_background.js.
+const BLUR_GROUP_NAME = "bms-panel-backgroundgroup";
+const BLUR_WIDGET_NAME = "bms-panel-blurred-widget";
+const BLUR_MASK_NAME = "panel-color-matcher-gradient-mask";
+
+// Fades an actor vertically, multiplying its premultiplied color by an
+// alpha going from topAlpha at the top edge to bottomAlpha at the bottom.
+const GradientMaskEffect = GObject.registerClass({
+  GTypeName: "PanelColorMatcherGradientMaskEffect",
+}, class GradientMaskEffect extends Shell.GLSLEffect {
+
+  vfunc_build_pipeline() {
+    this.add_glsl_snippet(
+      Cogl.SnippetHook.FRAGMENT,
+      "uniform float top_alpha;\nuniform float bottom_alpha;",
+      "cogl_color_out *= mix(top_alpha, bottom_alpha, cogl_tex_coord_in[0].t);",
+      false);
+  }
+
+  vfunc_paint(node, paintContext, flags) {
+    // An offscreen effect reuses its last frame unless the actor itself
+    // changed, but the blur behind follows the stage without that, e.g.
+    // while swiping workspaces. Like Blur my Shell's own effects, redraw
+    // the input on every paint so the mask never freezes the blur.
+    super.vfunc_paint(node, paintContext, flags | Clutter.EffectPaintFlags.ACTOR_DIRTY);
+  }
+
+  setAlphas(top, bottom) {
+    if (top === this._top && bottom === this._bottom) {
+      return;
+    }
+
+    this._top = top;
+    this._bottom = bottom;
+    this.set_uniform_float(this.get_uniform_location("top_alpha"), 1, [top]);
+    this.set_uniform_float(this.get_uniform_location("bottom_alpha"), 1, [bottom]);
+    this.queue_repaint();
+  }
+
+});
 
 export default class PanelColorMatcher extends Extension {
 
@@ -54,6 +98,12 @@ export default class PanelColorMatcher extends Extension {
       },
       this);
 
+    // Blur my Shell may create or recreate its panel blur at any time,
+    // e.g. when enabled after us or when its settings change.
+    Main.panel.get_parent().connectObject(
+      "child-added", () => this._syncBackground(),
+      this);
+
     Main.overview.connectObject(
       // Samples taken while the overview was visible captured its
       // backdrop, so resample once the desktop is back on screen.
@@ -87,6 +137,8 @@ export default class PanelColorMatcher extends Extension {
     this._settings.connectObject(
       "changed::opacity", () => this._syncBackground(),
       "changed::maximized-opacity", () => this._syncBackground(),
+      "changed::gradient", () => this._syncBackground(),
+      "changed::gradient-opacity", () => this._syncBackground(),
       "changed::compensate-brightness", () => this._syncBackground(),
       "changed::text-contrast", () => this._syncBackground(),
       "changed::wallpaper-accent", () => this._updateAccent(),
@@ -120,6 +172,7 @@ export default class PanelColorMatcher extends Extension {
     this._stateAdjustment.disconnectObject(this);
     this._stateAdjustment = null;
     Main.panel.disconnectObject(this);
+    Main.panel.get_parent().disconnectObject(this);
     this._backgroundSettings.disconnectObject(this);
     this._backgroundSettings = null;
     this._interfaceSettings.disconnectObject(this);
@@ -137,6 +190,7 @@ export default class PanelColorMatcher extends Extension {
       this._quickTimeout = null;
     }
 
+    this._syncBlurMask(null);
     Main.panel.set_style(null);
     this._bg = null;
     this._style = null;
@@ -273,6 +327,45 @@ export default class PanelColorMatcher extends Extension {
     this._syncBackground();
   }
 
+  _blurActor() {
+    // Blur my Shell inserts its panel blur behind the panel, in the panel
+    // box, as a background group holding the blurred widget.
+    const group = Main.panel.get_parent()?.get_children()
+      .find(c => c.name === BLUR_GROUP_NAME);
+
+    return group?.get_children().find(c => c.name === BLUR_WIDGET_NAME) ?? null;
+  }
+
+  _syncBlurMask(bottomOpacity) {
+    // The blur is its own actor behind the panel, so the panel's gradient
+    // can't make it transparent. Fade it with the same vertical gradient,
+    // from full blur at the top to bottomOpacity, or drop the mask on null.
+    const actor = this._blurActor();
+
+    if (!actor) {
+      return;
+    }
+
+    let effect = actor.get_effect(BLUR_MASK_NAME);
+
+    if (bottomOpacity === null) {
+      if (effect) {
+        actor.remove_effect(effect);
+      }
+
+      return;
+    }
+
+    // Added after Blur my Shell's backdrop capture, so the capture still
+    // reads the stage and only its result is drawn through the mask.
+    if (!effect) {
+      effect = new GradientMaskEffect();
+      actor.add_effect_with_name(BLUR_MASK_NAME, effect);
+    }
+
+    effect.setAlphas(1, bottomOpacity);
+  }
+
   _hasMaximizedWindow() {
     // Whether a maximized or fullscreen window sits under the panel,
     // i.e. on the primary monitor of the active workspace.
@@ -289,6 +382,7 @@ export default class PanelColorMatcher extends Extension {
     if (!this._bg) {
       this._style = null;
       Main.panel.set_style(null);
+      this._syncBlurMask(null);
 
       return;
     }
@@ -301,18 +395,40 @@ export default class PanelColorMatcher extends Extension {
 
     const opacity = this._settings.get_int(key) / 100;
     const overview = Math.min(this._stateAdjustment.value, 1);
+    // A window filling the screen under the panel gets a solid panel.
+    const gradient = this._settings.get_boolean("gradient") && !this._maximized;
+    let bottomOpacity = opacity;
+
+    if (gradient) {
+      bottomOpacity = this._settings.get_int("gradient-opacity") / 100;
+    }
+
+    // The text sits mid-height, where a gradient has the mean of its ends,
+    // so judge brightness and contrast at that opacity.
     const [r, g, b] = panelColor(
       this._bg.split(",").map(Number),
-      opacity,
+      (opacity + bottomOpacity) / 2,
       this._settings.get_boolean("compensate-brightness"),
       this._settings.get_int("text-contrast") / 100);
-    this._style = `background-color: rgba(${r}, ${g}, ${b}, ${opacity * (1 - overview)});`;
+    const top = `rgba(${r}, ${g}, ${b}, ${opacity * (1 - overview)})`;
+
+    if (gradient) {
+      // St draws gradients with alpha, so the transparent end shows what is
+      // behind the panel. The start color doubles as background-color,
+      // overriding the theme's.
+      const bottom = `rgba(${r}, ${g}, ${b}, ${bottomOpacity * (1 - overview)})`;
+      this._style = "background-gradient-direction: vertical; " +
+        `background-gradient-start: ${top}; background-gradient-end: ${bottom};`;
+      this._syncBlurMask(bottomOpacity);
+    } else {
+      this._style = `background-color: ${top};`;
+      this._syncBlurMask(null);
+    }
 
     // Follow the overview frame by frame instead of crossfading behind it.
     if (overview > 0) {
       this._style += " transition-duration: 0ms;";
     }
-
 
     Main.panel.set_style(this._style);
   }
