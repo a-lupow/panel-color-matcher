@@ -28,13 +28,18 @@
     <key name="compensate-brightness" type="b">
       <default>false</default>
       <summary>Compensate brightness for opacity</summary>
-      <description>Darken the panel color as opacity decreases, so a translucent panel keeps its contrast.</description>
+      <description>Darken the panel color as opacity decreases, so a translucent panel keeps its contrast, and boost its saturation to keep it vivid.</description>
     </key>
     <key name="text-contrast" type="i">
       <range min="0" max="100"/>
       <default>100</default>
       <summary>Text contrast strength</summary>
       <description>How strongly bright colors are darkened to keep the white panel text readable, in percent. 0 disables it; 100 enforces 4.5:1 contrast.</description>
+    </key>
+    <key name="invert-text" type="b">
+      <default>false</default>
+      <summary>Dark text on bright colors</summary>
+      <description>Instead of darkening a color too bright for the white panel text, keep it and turn the text and symbolic icons black. The text contrast strength sets how bright is too bright; at 0 the text never turns dark.</description>
     </key>
     <key name="wallpaper-accent" type="b">
       <default>true</default>

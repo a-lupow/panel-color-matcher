@@ -27,6 +27,9 @@ const BLUR_GROUP_NAME = "bms-panel-backgroundgroup";
 const BLUR_WIDGET_NAME = "bms-panel-blurred-widget";
 const BLUR_MASK_NAME = "panel-color-matcher-gradient-mask";
 
+// Panel style class for dark text and icons, see stylesheet.css.
+const DARK_TEXT_CLASS = "panel-color-matcher-dark-text";
+
 // Fades an actor vertically, multiplying its premultiplied color by an
 // alpha going from topAlpha at the top edge to bottomAlpha at the bottom.
 const GradientMaskEffect = GObject.registerClass({
@@ -81,18 +84,17 @@ export default class PanelColorMatcher extends Extension {
       this);
 
     // An inline style overrides the theme's transparent #panel:overview,
-    // so fade the background along with the overview transition, gestures
-    // included. 0 is hidden, 1 the window picker, 2 the app grid.
-    this._stateAdjustment = Main.overview._overview.controls._stateAdjustment;
-    this._stateAdjustment.connectObject(
-      "notify::value", () => this._syncBackground(),
-      this);
+    // so drop ours while the overview shows and let the theme's transition
+    // crossfade the panel. Following the overview frame by frame would
+    // restyle the whole panel on every frame, which stutters gestures.
+    this._overviewShowing = Main.overview.visible;
 
     // The shell resets the panel's inline style when a gesture ends and
-    // after the overview has hidden (_hideDone in overview.js), so put ours back.
+    // after the overview has hidden (_hideDone in overview.js), so put ours
+    // back. While the overview shows, the shell owns the style.
     Main.panel.connectObject(
       "notify::style", () => {
-        if (Main.panel.style !== this._style) {
+        if (!this._overviewShowing && Main.panel.style !== this._style) {
           this._syncBackground();
         }
       },
@@ -105,6 +107,8 @@ export default class PanelColorMatcher extends Extension {
       this);
 
     Main.overview.connectObject(
+      "showing", () => this._setOverviewShowing(true),
+      "hiding", () => this._setOverviewShowing(false),
       // Samples taken while the overview was visible captured its
       // backdrop, so resample once the desktop is back on screen.
       "hidden", () => {
@@ -141,6 +145,7 @@ export default class PanelColorMatcher extends Extension {
       "changed::gradient-opacity", () => this._syncBackground(),
       "changed::compensate-brightness", () => this._syncBackground(),
       "changed::text-contrast", () => this._syncBackground(),
+      "changed::invert-text", () => this._syncBackground(),
       "changed::wallpaper-accent", () => this._updateAccent(),
       this);
 
@@ -169,8 +174,6 @@ export default class PanelColorMatcher extends Extension {
     global.display.disconnectObject(this);
     global.window_manager.disconnectObject(this);
     Main.overview.disconnectObject(this);
-    this._stateAdjustment.disconnectObject(this);
-    this._stateAdjustment = null;
     Main.panel.disconnectObject(this);
     Main.panel.get_parent().disconnectObject(this);
     this._backgroundSettings.disconnectObject(this);
@@ -191,6 +194,7 @@ export default class PanelColorMatcher extends Extension {
     }
 
     this._syncBlurMask(null);
+    this._syncDarkText(false);
     Main.panel.set_style(null);
     this._bg = null;
     this._style = null;
@@ -378,11 +382,36 @@ export default class PanelColorMatcher extends Extension {
       (w.is_maximized() || w.is_fullscreen()));
   }
 
+  _syncDarkText(dark) {
+    // stylesheet.css recolors the text and symbolic icons under this class.
+    if (dark) {
+      Main.panel.add_style_class_name(DARK_TEXT_CLASS);
+    } else {
+      Main.panel.remove_style_class_name(DARK_TEXT_CLASS);
+    }
+  }
+
+  _setOverviewShowing(showing) {
+    this._overviewShowing = showing;
+    this._syncBackground();
+  }
+
   _syncBackground() {
     if (!this._bg) {
       this._style = null;
       Main.panel.set_style(null);
       this._syncBlurMask(null);
+      this._syncDarkText(false);
+
+      return;
+    }
+
+    // The overview shows the panel transparent over its own dark backdrop,
+    // so leave the panel to the theme until it hides again.
+    if (this._overviewShowing) {
+      this._style = null;
+      Main.panel.set_style(null);
+      this._syncDarkText(false);
 
       return;
     }
@@ -394,7 +423,6 @@ export default class PanelColorMatcher extends Extension {
     }
 
     const opacity = this._settings.get_int(key) / 100;
-    const overview = Math.min(this._stateAdjustment.value, 1);
     // A window filling the screen under the panel gets a solid panel.
     const gradient = this._settings.get_boolean("gradient") && !this._maximized;
     let bottomOpacity = opacity;
@@ -405,29 +433,26 @@ export default class PanelColorMatcher extends Extension {
 
     // The text sits mid-height, where a gradient has the mean of its ends,
     // so judge brightness and contrast at that opacity.
-    const [r, g, b] = panelColor(
+    const { rgb: [r, g, b], darkText } = panelColor(
       this._bg.split(",").map(Number),
       (opacity + bottomOpacity) / 2,
       this._settings.get_boolean("compensate-brightness"),
-      this._settings.get_int("text-contrast") / 100);
-    const top = `rgba(${r}, ${g}, ${b}, ${opacity * (1 - overview)})`;
+      this._settings.get_int("text-contrast") / 100,
+      this._settings.get_boolean("invert-text"));
+    this._syncDarkText(darkText);
+    const top = `rgba(${r}, ${g}, ${b}, ${opacity})`;
 
     if (gradient) {
       // St draws gradients with alpha, so the transparent end shows what is
       // behind the panel. The start color doubles as background-color,
       // overriding the theme's.
-      const bottom = `rgba(${r}, ${g}, ${b}, ${bottomOpacity * (1 - overview)})`;
+      const bottom = `rgba(${r}, ${g}, ${b}, ${bottomOpacity})`;
       this._style = "background-gradient-direction: vertical; " +
         `background-gradient-start: ${top}; background-gradient-end: ${bottom};`;
       this._syncBlurMask(bottomOpacity);
     } else {
       this._style = `background-color: ${top};`;
       this._syncBlurMask(null);
-    }
-
-    // Follow the overview frame by frame instead of crossfading behind it.
-    if (overview > 0) {
-      this._style += " transition-duration: 0ms;";
     }
 
     Main.panel.set_style(this._style);

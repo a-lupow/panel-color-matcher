@@ -7,15 +7,33 @@ export const MIN_MAX_LUMA = 118;
 
 export const luma = (r, g, b) => 0.299 * r + 0.587 * g + 0.114 * b;
 
-// Return the panel [r, g, b] for the sampled backdrop color bg, opacity
-// (0-1), brightness compensation and text-contrast strength (0-1).
-export function panelColor(bg, opacity, compensate, strength) {
+// Darkened colors look muddy, so push the channels away from their gray by
+// the given factor (1 keeps the color). This keeps the luma, so contrast
+// caps computed before still hold.
+function saturate(rgb, amount) {
+  const gray = luma(...rgb);
+  let [r, g, b] = rgb.map(c => Math.min(255, Math.max(0, gray + (c - gray) * amount)));
+  // Clamping a channel at 0 raises the luma, so scale back down to gray's.
+  const boosted = luma(r, g, b);
+
+  if (boosted > gray) {
+    [r, g, b] = [r, g, b].map(c => c * gray / boosted);
+  }
+
+  return [r, g, b];
+}
+
+// Return the panel { rgb: [r, g, b], darkText } for the sampled backdrop
+// color bg, opacity (0-1), brightness compensation, text-contrast strength
+// (0-1) and whether to switch to dark text instead of darkening the color.
+export function panelColor(bg, opacity, compensate, strength, invert) {
   let [r, g, b] = bg;
 
   if (compensate) {
     // A translucent panel blends with the similar colors beneath it and
-    // washes out, so darken the color in proportion to the transparency.
-    [r, g, b] = [r, g, b].map(c => Math.round(c * opacity));
+    // washes out, so darken the color in proportion to the transparency,
+    // and boost saturation by as much, up to double, to keep it vivid.
+    [r, g, b] = saturate([r, g, b].map(c => c * opacity), 2 - opacity).map(Math.round);
   }
 
   // The panel text is white, so darken the color until the result keeps
@@ -27,27 +45,22 @@ export function panelColor(bg, opacity, compensate, strength) {
   const blendedLuma = opacity * panelLuma + (1 - opacity) * backdropLuma;
   const maxLuma = 255 - (255 - MIN_MAX_LUMA) * strength;
 
+  // Black text has at least 4.5:1 contrast above MIN_MAX_LUMA, so a color
+  // too bright for white text keeps its brightness and gets dark text.
+  // This also covers a transparent panel over a bright backdrop.
+  if (invert && blendedLuma > maxLuma) {
+    return { rgb: [r, g, b], darkText: true };
+  }
+
   if (blendedLuma > maxLuma && opacity > 0 && panelLuma > 0) {
     const k = Math.max(0, (maxLuma - (1 - opacity) * backdropLuma) / (opacity * panelLuma));
-    [r, g, b] = [r, g, b].map(c => c * k);
-    // Darkening makes colors look muddy, so boost saturation in proportion
-    // to how much was darkened, up to double. Pushing channels away from
-    // their gray keeps the luma, so the contrast cap still holds.
-    const gray = luma(r, g, b);
-    const vibrance = 1 + (1 - k);
-    [r, g, b] = [r, g, b].map(c => Math.min(255, Math.max(0, gray + (c - gray) * vibrance)));
-    // Clamping a channel at 0 raises the luma, so scale back down to gray's.
-    const boosted = luma(r, g, b);
-
-    if (boosted > gray) {
-      [r, g, b] = [r, g, b].map(c => c * gray / boosted);
-    }
-
+    // Boost saturation in proportion to how much was darkened, up to double.
+    [r, g, b] = saturate([r, g, b].map(c => c * k), 2 - k);
     // Floor so rounding can't push the luma back over the cap.
     [r, g, b] = [r, g, b].map(Math.floor);
   }
 
-  return [r, g, b];
+  return { rgb: [r, g, b], darkText: false };
 }
 
 // libadwaita's accent colors, except slate, the fallback for gray images.

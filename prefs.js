@@ -43,12 +43,19 @@ export default class PanelColorMatcherPreferences extends ExtensionPreferences {
         settings.bind("gradient", gradientOpacityRow, "sensitive", Gio.SettingsBindFlags.GET);
         const compensateRow = new Adw.SwitchRow({
             title: "Compensate Brightness",
-            subtitle: "Darken the panel color as opacity decreases",
+            subtitle: "Darken and saturate the panel color as opacity decreases",
         });
         settings.bind("compensate-brightness", compensateRow, "active", Gio.SettingsBindFlags.DEFAULT);
         group.add(compensateRow);
         addPercentRow("text-contrast", "Text Contrast",
                       "How strongly bright colors are darkened for the white text, in percent");
+        const invertRow = new Adw.SwitchRow({
+            title: "Dark Text on Bright Colors",
+            subtitle: "Turn the text and symbolic icons black instead of darkening colors " +
+                      "too bright for the text contrast above",
+        });
+        settings.bind("invert-text", invertRow, "active", Gio.SettingsBindFlags.DEFAULT);
+        group.add(invertRow);
         const accentRow = new Adw.SwitchRow({
             title: "Accent Color from Wallpaper",
             subtitle: "Set the system accent color to the closest match to the wallpaper",
