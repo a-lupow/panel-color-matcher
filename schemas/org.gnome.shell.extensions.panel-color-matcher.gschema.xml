@@ -25,10 +25,11 @@
       <summary>Gradient bottom opacity</summary>
       <description>Opacity of the panel background at its bottom edge, in percent, while the gradient is on.</description>
     </key>
-    <key name="compensate-brightness" type="b">
-      <default>false</default>
-      <summary>Compensate brightness for opacity</summary>
-      <description>Darken the panel color as opacity decreases, so a translucent panel keeps its contrast, and boost its saturation to keep it vivid.</description>
+    <key name="brightness-compensation" type="i">
+      <range min="0" max="100"/>
+      <default>0</default>
+      <summary>Brightness compensation strength</summary>
+      <description>How strongly the panel color is darkened, bright colors more and dark ones barely, so the white text stands out over a backdrop close to its brightness, with its saturation boosted slightly to keep it vivid, in percent. A translucent panel darkens its color further for the same effect. 0 disables it.</description>
     </key>
     <key name="text-contrast" type="i">
       <range min="0" max="100"/>
@@ -39,7 +40,12 @@
     <key name="invert-text" type="b">
       <default>false</default>
       <summary>Dark text on bright colors</summary>
-      <description>Instead of darkening a color too bright for the white panel text, keep it and turn the text and symbolic icons black. The text contrast strength sets how bright is too bright; at 0 the text never turns dark.</description>
+      <description>Instead of darkening a color too bright for the white panel text, keep it and turn the text and symbolic icons black whenever black reads better. The text contrast strength sets how much white is preferred: at 100 the color with more contrast wins, at 50 black needs twice the contrast of white, and at 0 the text never turns dark.</description>
+    </key>
+    <key name="text-shadow" type="b">
+      <default>false</default>
+      <summary>Text shadow</summary>
+      <description>Outline the panel text and symbolic icons with a soft shadow in the opposite color, black behind white text and white behind dark text, for sharper contrast.</description>
     </key>
     <key name="wallpaper-accent" type="b">
       <default>true</default>

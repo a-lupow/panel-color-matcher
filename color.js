@@ -7,6 +7,11 @@ export const MIN_MAX_LUMA = 118;
 
 export const luma = (r, g, b) => 0.299 * r + 0.587 * g + 0.114 * b;
 
+// How much brightness compensation at full strength dims what's seen
+// through the panel over white; darker colors are dimmed proportionally
+// less.
+const MAX_DIM = 0.4;
+
 // Darkened colors look muddy, so push the channels away from their gray by
 // the given factor (1 keeps the color). This keeps the luma, so contrast
 // caps computed before still hold.
@@ -24,16 +29,25 @@ function saturate(rgb, amount) {
 }
 
 // Return the panel { rgb: [r, g, b], darkText } for the sampled backdrop
-// color bg, opacity (0-1), brightness compensation, text-contrast strength
-// (0-1) and whether to switch to dark text instead of darkening the color.
-export function panelColor(bg, opacity, compensate, strength, invert) {
+// color bg, opacity (0-1), brightness compensation strength (0-1),
+// text-contrast strength (0-1), whether to switch to dark text instead of
+// darkening the color and whether the panel is a gradient.
+export function panelColor(bg, opacity, compensate, strength, invert, gradient) {
   let [r, g, b] = bg;
 
-  if (compensate) {
-    // A translucent panel blends with the similar colors beneath it and
-    // washes out, so darken the color in proportion to the transparency,
-    // and boost saturation by as much, up to double, to keep it vivid.
-    [r, g, b] = saturate([r, g, b].map(c => c * opacity), 2 - opacity).map(Math.round);
+  if (compensate > 0 && opacity > 0) {
+    // A backdrop close in brightness to the white text needs a darker
+    // panel, a dark one barely any, so dim what's seen through the panel,
+    // the blend of it and the backdrop, in proportion to the color's
+    // brightness, by up to MAX_DIM for white at full strength. The panel
+    // can only dim the blend by its own opacity, so a translucent panel
+    // darkens its color more for the same dimming, down to black.
+    // Darkening washes colors out, so boost saturation slightly too. Keep
+    // at least a third of the brightness, so the panel stays tinted rather
+    // than black, at the cost of dimming less on a very translucent panel.
+    const dim = compensate * MAX_DIM * luma(r, g, b) / 255;
+    const k = Math.max(1 / 3, 1 - dim / opacity);
+    [r, g, b] = saturate([r, g, b].map(c => c * k), 1 + 0.5 * (1 - k)).map(Math.round);
   }
 
   // The panel text is white, so darken the color until the result keeps
@@ -45,11 +59,20 @@ export function panelColor(bg, opacity, compensate, strength, invert) {
   const blendedLuma = opacity * panelLuma + (1 - opacity) * backdropLuma;
   const maxLuma = 255 - (255 - MIN_MAX_LUMA) * strength;
 
-  // Black text has at least 4.5:1 contrast above MIN_MAX_LUMA, so a color
-  // too bright for white text keeps its brightness and gets dark text.
-  // This also covers a transparent panel over a bright backdrop.
-  if (invert && blendedLuma > maxLuma) {
-    return { rgb: [r, g, b], darkText: true };
+  // A gradient fades into the backdrop around the text, so there judge
+  // the backdrop itself, not its blend with a compensated, darker color.
+  let textLuma = blendedLuma;
+
+  if (gradient) {
+    textLuma = backdropLuma;
+  }
+
+  // Pick the text color that reads better where the text sits, leaning
+  // to white by 1 / strength: at full strength whichever has more
+  // contrast, at a third black needs three times white's, at zero never.
+  // Dark text needs no darkening, so it gets the uncompensated color.
+  if (invert && strength > 0 && contrast(0, textLuma) > contrast(255, textLuma) / strength) {
+    return { rgb: [...bg], darkText: true, contrast: contrast(0, textLuma) };
   }
 
   if (blendedLuma > maxLuma && opacity > 0 && panelLuma > 0) {
@@ -60,7 +83,101 @@ export function panelColor(bg, opacity, compensate, strength, invert) {
     [r, g, b] = [r, g, b].map(Math.floor);
   }
 
-  return { rgb: [r, g, b], darkText: false };
+  textLuma = opacity * luma(r, g, b) + (1 - opacity) * backdropLuma;
+
+  if (gradient) {
+    textLuma = backdropLuma;
+  }
+
+  return { rgb: [r, g, b], darkText: false, contrast: contrast(255, textLuma) };
+}
+
+// WCAG contrast ratio of two 0-255 lumas, approximating relative
+// luminance with a 2.2 gamma.
+export function contrast(a, b) {
+  const [la, lb] = [a, b].map(l => Math.pow(l / 255, 2.2) + 0.05);
+
+  return Math.max(la, lb) / Math.min(la, lb);
+}
+
+// Return the dark text [r, g, b] for the panel color rgb: a deep shade of
+// it rather than pure black, so the text belongs to the wallpaper. A fifth
+// of the brightness keeps it dark enough for the contrast that chose dark
+// text, and the saturation boost keeps its hue from fading to gray.
+export function darkTextColor(rgb) {
+  return saturate(rgb.map(c => c * 0.2), 2).map(Math.round);
+}
+
+// Return the text-shadow [r, g, b, alpha] for the panel color rgb. Behind
+// white text that's a darker tint of the panel color, and behind dark text
+// a lighter one. Plain darkening would look the same as translucent black,
+// so boost saturation to make the tint show. The shadow is there to rescue
+// contrast, so it's the stronger the less contrast the text has: barely
+// there at 10:1, full at 2:1.
+export function shadowColor(rgb, darkText, textContrast) {
+  const need = Math.min(1, Math.max(0, Math.log(10 / textContrast) / Math.log(10 / 2)));
+  const alpha = Math.round((0.35 + 0.55 * need) * 100) / 100;
+
+  if (darkText) {
+    return [...rgb.map(c => Math.round(c + (255 - c) * 0.75)), alpha];
+  }
+
+  return [...saturate(rgb.map(c => c * 0.35), 3).map(Math.round), alpha];
+}
+
+// Samples this far apart, as the sum of channel differences, no longer
+// count as the same color; closer ones count the more the closer they are.
+const SIMILAR_DISTANCE = 64;
+
+// How many times a dark sample counts against a light one when choosing
+// between the darker and the lighter half of the samples. The panel text
+// is white, so a dark tone keeps it readable across the whole width; at 2
+// a dark area wins once it covers a third of the width.
+const DARK_PREFERENCE = 2;
+
+// Return the most prevalent of the [r, g, b] samples. First split them at
+// the luma halfway between the darkest and the lightest, and keep the
+// darker half if it holds its share of the samples, counted by
+// DARK_PREFERENCE, else the lighter half. Splitting by tone first lets a
+// dark area win even if it's dark in many different colors, e.g. a rock
+// going from black to slate, against a sky all of one blue. Then within
+// that half, return the sample in the densest crowd of similar samples,
+// each counting the more the closer it is. Counting near and far ones
+// alike would let a stray sample between two crowds, e.g. a brown leaf
+// between green trees and a dark window, reach both and win. It's a
+// sample itself, not a blend, so the panel gets a color that's really on
+// screen. On an exact tie, prefer the darker sample.
+export function prevalentColor(samples) {
+  const distance = (a, b) => a.reduce((sum, c, i) => sum + Math.abs(c - b[i]), 0);
+  const lumas = samples.map(c => luma(...c));
+  const split = (Math.min(...lumas) + Math.max(...lumas)) / 2;
+  const dark = samples.filter((_, i) => lumas[i] <= split);
+  const light = samples.filter((_, i) => lumas[i] > split);
+  let group = light;
+
+  if (dark.length * DARK_PREFERENCE >= light.length) {
+    group = dark;
+  }
+
+  let best = null;
+  let bestScore = -1;
+
+  for (const sample of group) {
+    const score = group.reduce((sum, s) =>
+      sum + Math.max(0, 1 - distance(s, sample) / SIMILAR_DISTANCE), 0);
+    let better = score > bestScore;
+
+    if (score === bestScore) {
+      better = luma(...sample) < luma(...best);
+    }
+
+    if (better) {
+      best = sample;
+      bestScore = score;
+    }
+  }
+
+  return best;
 }
 
 // libadwaita's accent colors, except slate, the fallback for gray images.

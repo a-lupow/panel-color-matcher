@@ -2,18 +2,21 @@
 
 /* Dark text and symbolic icons on a panel too bright for white text.
  * Full-color icons ignore the color, so only symbolic icons change.
- * Themes such as Marble set panel colors with !important, so do too. */
+ * extension.js sets the color on the panel, a deep shade of the panel
+ * color, and these take it from there. Themes such as Marble set panel
+ * colors with !important, so do too. */
 
 #panel.panel-color-matcher-dark-text .panel-button,
 #panel.panel-color-matcher-dark-text .panel-button .clock,
 #panel.panel-color-matcher-dark-text .panel-button .system-status-icon {
-  color: #000000 !important;
+  color: inherit !important;
   text-shadow: none !important;
   icon-shadow: none !important;
 }
 
+/* Dots are boxes, whose background can't take the text color. */
 #panel.panel-color-matcher-dark-text #panelActivities .workspace-dot {
-  background-color: #000000 !important;
+  background-color: rgba(0, 0, 0, 0.8) !important;
 }
 
 /* The theme's white hover highlight barely shows on a bright panel. */
@@ -82,4 +85,12 @@
 #panel.panel-color-matcher-dark-text .panel-button.screen-sharing-indicator:active,
 #panel.panel-color-matcher-dark-text .panel-button.screen-sharing-indicator:checked {
   box-shadow: inset 0 0 0 100px #ff902e;
+}
+
+/* extension.js casts one shadow from each whole section of the panel,
+ * whatever draws there, so drop the per-label and per-icon shadows, the
+ * theme's included, to not draw them twice. */
+#panel.panel-color-matcher-text-shadow * {
+  text-shadow: none !important;
+  icon-shadow: none !important;
 }

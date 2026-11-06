@@ -11,24 +11,34 @@ import Shell from "gi://Shell";
 import * as Main from "resource:///org/gnome/shell/ui/main.js";
 import { Extension } from "resource:///org/gnome/shell/extensions/extension.js";
 
-import { accentFromPixels, panelColor } from "./color.js";
+import { accentFromPixels, darkTextColor, panelColor, prevalentColor, shadowColor } from "./color.js";
 
 Gio._promisify(Gio.File.prototype, "load_contents_async");
 Gio._promisify(Gio.File.prototype, "read_async");
 Gio._promisify(GdkPixbuf.Pixbuf, "new_from_stream_at_scale_async", "new_from_stream_finish");
-Gio._promisify(Shell.Screenshot.prototype, "pick_color");
+Gio._promisify(Shell.Screenshot.prototype, "screenshot_area");
 
 // Changing the accent restyles the shell and every app, which stutters
 // whatever is moving, so wait for this long without input first.
 const ACCENT_IDLE_TIME = 2000;
+
+// Backdrop samples taken along the panel's width, all from one capture.
+const SAMPLE_COUNT = 16;
+
+// Each sample repaints the stage once, so take at most one per this many
+// ms; requests in between are coalesced into one at the end of it.
+const SAMPLE_INTERVAL = 300;
 
 // Blur my Shell's panel blur actors, see components/panel/panel_background.js.
 const BLUR_GROUP_NAME = "bms-panel-backgroundgroup";
 const BLUR_WIDGET_NAME = "bms-panel-blurred-widget";
 const BLUR_MASK_NAME = "panel-color-matcher-gradient-mask";
 
-// Panel style class for dark text and icons, see stylesheet.css.
+// Panel style classes for dark text and icons and their shadows, see
+// stylesheet.css.
 const DARK_TEXT_CLASS = "panel-color-matcher-dark-text";
+const TEXT_SHADOW_CLASS = "panel-color-matcher-text-shadow";
+const SHADOW_EFFECT_NAME = "panel-color-matcher-shadow";
 
 // Fades an actor vertically, multiplying its premultiplied color by an
 // alpha going from topAlpha at the top edge to bottomAlpha at the bottom.
@@ -66,6 +76,62 @@ const GradientMaskEffect = GObject.registerClass({
 
 });
 
+// Draws a soft shadow beneath everything an actor paints, cast from its
+// alpha 2 px down with a Gaussian blur of about 12 px, in shadow_color
+// (straight, not premultiplied). It samples a 9x9 grid 3 px apart, which
+// the texture's linear filtering smooths between.
+const ShadowEffect = GObject.registerClass({
+  GTypeName: "PanelColorMatcherShadowEffect",
+}, class ShadowEffect extends Shell.GLSLEffect {
+
+  vfunc_build_pipeline() {
+    this.add_glsl_snippet(
+      Cogl.SnippetHook.FRAGMENT,
+      "uniform vec4 shadow_color;\nuniform vec2 pixel_size;",
+      `vec2 uv = cogl_tex_coord_in[0].st - vec2(0.0, 2.0) * pixel_size;
+      float alpha = 0.0;
+      float total = 0.0;
+
+      for (int x = -4; x <= 4; x++) {
+        for (int y = -4; y <= 4; y++) {
+          float w = exp(-float(x * x + y * y) / 8.0);
+          alpha += w * texture2D(cogl_sampler0, uv + vec2(float(x), float(y)) * 3.0 * pixel_size).a;
+          total += w;
+        }
+      }
+
+      vec4 shadow = vec4(shadow_color.rgb, 1.0) * shadow_color.a * (alpha / total) * cogl_color_in.a;
+      cogl_color_out += shadow * (1.0 - cogl_color_out.a);`,
+      false);
+  }
+
+  vfunc_paint(node, paintContext, flags) {
+    // The texture spans the actor, so a pixel is 1 / its size.
+    const [width, height] = this.actor.get_size();
+
+    if (width !== this._width || height !== this._height) {
+      this._width = width;
+      this._height = height;
+      this.set_uniform_float(this.get_uniform_location("pixel_size"), 2, [1 / width, 1 / height]);
+    }
+
+    super.vfunc_paint(node, paintContext, flags);
+  }
+
+  setColor(color) {
+    // color is [r, g, b] in 0-255 and alpha in 0-1.
+    if (color.join() === this._color?.join()) {
+      return;
+    }
+
+    this._color = color;
+    const [r, g, b, alpha] = color;
+    this.set_uniform_float(this.get_uniform_location("shadow_color"), 4, [r / 255, g / 255, b / 255, alpha]);
+    this.queue_repaint();
+  }
+
+});
+
 export default class PanelColorMatcher extends Extension {
 
   enable() {
@@ -81,6 +147,12 @@ export default class PanelColorMatcher extends Extension {
       "size-changed", () => this._updateDelayed(),
       "switch-workspace", () => this._updateDelayed(),
       "unminimize", () => this._updateDelayed(),
+      this);
+
+    // A new monitor layout moves the panel, or gives a monitorless session
+    // its first monitor to sample.
+    Main.layoutManager.connectObject(
+      "monitors-changed", () => this._updateDelayed(),
       this);
 
     // An inline style overrides the theme's transparent #panel:overview,
@@ -143,9 +215,13 @@ export default class PanelColorMatcher extends Extension {
       "changed::maximized-opacity", () => this._syncBackground(),
       "changed::gradient", () => this._syncBackground(),
       "changed::gradient-opacity", () => this._syncBackground(),
-      "changed::compensate-brightness", () => this._syncBackground(),
+      "changed::brightness-compensation", () => this._syncBackground(),
       "changed::text-contrast", () => this._syncBackground(),
       "changed::invert-text", () => this._syncBackground(),
+      "changed::text-shadow", () => {
+        this._syncTextShadow();
+        this._syncBackground();
+      },
       "changed::wallpaper-accent", () => this._updateAccent(),
       this);
 
@@ -155,8 +231,12 @@ export default class PanelColorMatcher extends Extension {
     this._maximized = false;
     this._updateTimeout = null;
     this._quickTimeout = null;
+    this._throttleTimeout = null;
+    this._sampling = false;
+    this._lastSample = -Infinity;
     this._accentRequest = 0;
     this._accentWatch = 0;
+    this._syncTextShadow();
     this._update();
     this._updateAccent();
   }
@@ -173,6 +253,7 @@ export default class PanelColorMatcher extends Extension {
 
     global.display.disconnectObject(this);
     global.window_manager.disconnectObject(this);
+    Main.layoutManager.disconnectObject(this);
     Main.overview.disconnectObject(this);
     Main.panel.disconnectObject(this);
     Main.panel.get_parent().disconnectObject(this);
@@ -188,6 +269,11 @@ export default class PanelColorMatcher extends Extension {
       this._updateTimeout = null;
     }
 
+    if (this._throttleTimeout) {
+      GLib.source_remove(this._throttleTimeout);
+      this._throttleTimeout = null;
+    }
+
     if (this._quickTimeout) {
       GLib.source_remove(this._quickTimeout);
       this._quickTimeout = null;
@@ -195,6 +281,8 @@ export default class PanelColorMatcher extends Extension {
 
     this._syncBlurMask(null);
     this._syncDarkText(false);
+    this._syncShadowEffect(null);
+    Main.panel.remove_style_class_name(TEXT_SHADOW_CLASS);
     Main.panel.set_style(null);
     this._bg = null;
     this._style = null;
@@ -309,13 +397,25 @@ export default class PanelColorMatcher extends Extension {
     this._setAccentWhenIdle(accent);
   }
 
-  async _sampleColor(x, y) {
-    // Read a single pixel like the shell's color picker does, instead of
-    // capturing and encoding the whole stage.
+  async _sampleStrip(x, y, width) {
+    // Every capture repaints the stage synchronously, which stalls
+    // whatever is animating, so capture one 1 px high strip, not one pixel
+    // per sample. Its PNG is encoded in a worker thread and tiny.
     const screenshot = new Shell.Screenshot();
-    const [color] = await screenshot.pick_color(x, y);
+    const stream = Gio.MemoryOutputStream.new_resizable();
+    await screenshot.screenshot_area(x, y, width, 1, stream);
+    stream.close(null);
+    const png = Gio.MemoryInputStream.new_from_bytes(stream.steal_as_bytes());
+    const pixbuf = GdkPixbuf.Pixbuf.new_from_stream(png, null);
+    // On a scaled monitor the strip has more pixels than logical width.
+    const pixels = pixbuf.read_pixel_bytes().toArray();
+    const channels = pixbuf.n_channels;
 
-    return { r: color.red, g: color.green, b: color.blue };
+    return Array.from({ length: SAMPLE_COUNT }, (_, i) => {
+      const p = Math.floor(pixbuf.width * (i + 0.5) / SAMPLE_COUNT) * channels;
+
+      return { r: pixels[p], g: pixels[p + 1], b: pixels[p + 2] };
+    });
   }
 
   _applyStyle(bg, maximized) {
@@ -391,6 +491,40 @@ export default class PanelColorMatcher extends Extension {
     }
   }
 
+  _syncTextShadow() {
+    // stylesheet.css drops the per-label and per-icon shadows, since the
+    // shadow effect on the panel's sections takes their place.
+    if (this._settings.get_boolean("text-shadow")) {
+      Main.panel.add_style_class_name(TEXT_SHADOW_CLASS);
+    } else {
+      Main.panel.remove_style_class_name(TEXT_SHADOW_CLASS);
+    }
+  }
+
+  _syncShadowEffect(color) {
+    // Shadow everything each section draws, whatever kind of actor, from
+    // a tinted [r, g, b, alpha] color, or remove the shadow on null. The
+    // panel background sits on the panel itself, so it casts none.
+    for (const box of [Main.panel._leftBox, Main.panel._centerBox, Main.panel._rightBox]) {
+      let effect = box.get_effect(SHADOW_EFFECT_NAME);
+
+      if (color === null) {
+        if (effect) {
+          box.remove_effect(effect);
+        }
+
+        continue;
+      }
+
+      if (!effect) {
+        effect = new ShadowEffect();
+        box.add_effect_with_name(SHADOW_EFFECT_NAME, effect);
+      }
+
+      effect.setColor(color);
+    }
+  }
+
   _setOverviewShowing(showing) {
     this._overviewShowing = showing;
     this._syncBackground();
@@ -402,6 +536,7 @@ export default class PanelColorMatcher extends Extension {
       Main.panel.set_style(null);
       this._syncBlurMask(null);
       this._syncDarkText(false);
+      this._syncShadowEffect(null);
 
       return;
     }
@@ -412,6 +547,7 @@ export default class PanelColorMatcher extends Extension {
       this._style = null;
       Main.panel.set_style(null);
       this._syncDarkText(false);
+      this._syncShadowEffect(null);
 
       return;
     }
@@ -433,12 +569,13 @@ export default class PanelColorMatcher extends Extension {
 
     // The text sits mid-height, where a gradient has the mean of its ends,
     // so judge brightness and contrast at that opacity.
-    const { rgb: [r, g, b], darkText } = panelColor(
+    const { rgb: [r, g, b], darkText, contrast } = panelColor(
       this._bg.split(",").map(Number),
       (opacity + bottomOpacity) / 2,
-      this._settings.get_boolean("compensate-brightness"),
+      this._settings.get_int("brightness-compensation") / 100,
       this._settings.get_int("text-contrast") / 100,
-      this._settings.get_boolean("invert-text"));
+      this._settings.get_boolean("invert-text"),
+      gradient);
     this._syncDarkText(darkText);
     const top = `rgba(${r}, ${g}, ${b}, ${opacity})`;
 
@@ -455,6 +592,18 @@ export default class PanelColorMatcher extends Extension {
       this._syncBlurMask(null);
     }
 
+    // Each section of the panel casts one shadow from all it draws.
+    if (this._settings.get_boolean("text-shadow")) {
+      this._syncShadowEffect(shadowColor([r, g, b], darkText, contrast));
+    } else {
+      this._syncShadowEffect(null);
+    }
+
+    // stylesheet.css makes the dark text and icons take this color.
+    if (darkText) {
+      this._style += ` color: rgb(${darkTextColor([r, g, b]).join(", ")});`;
+    }
+
     Main.panel.set_style(this._style);
   }
 
@@ -463,43 +612,62 @@ export default class PanelColorMatcher extends Extension {
       return;
     }
 
+    // Without a monitor, e.g. early in a nested or headless session, the
+    // shell's screenshot reads a 0x0 area and crashes the shell.
+    // monitors-changed samples again once one appears. The primary index
+    // is 0 even then, so count the monitors.
+    if (global.display.get_n_monitors() === 0) {
+      return;
+    }
+
+    // Throttle: while a sample is queued, ignore requests. Within
+    // SAMPLE_INTERVAL of the last one, or while one is in flight, queue a
+    // single settled one for later, as it covers whatever asked meanwhile.
+    if (this._throttleTimeout) {
+      return;
+    }
+
+    let wait = this._lastSample + SAMPLE_INTERVAL - GLib.get_monotonic_time() / 1000;
+
+    if (this._sampling) {
+      wait = Math.max(wait, SAMPLE_INTERVAL);
+    }
+
+    if (wait > 0) {
+      this._throttleTimeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, Math.ceil(wait), () => {
+        this._throttleTimeout = null;
+        this._update();
+
+        return GLib.SOURCE_REMOVE;
+      });
+
+      return;
+    }
+
+    this._lastSample = GLib.get_monotonic_time() / 1000;
+    this._sampling = true;
     const index = global.display.get_primary_monitor();
     const monitor = global.display.get_monitor_geometry(index);
-    // Sample at 25% and 75% to detect half-maximized windows.
-    const x1 = monitor.x + Math.floor(monitor.width * 0.25);
-    const x2 = monitor.x + Math.floor(monitor.width * 0.75);
+    // Sample along the whole width, so the most common color wins over a
+    // spot of a busy wallpaper, and a half-maximized window shows as half
+    // of the samples.
     const y = monitor.y + Main.panel.height + 3;
 
-    Promise.all([
-      this._sampleColor(x1, y),
-      this._sampleColor(x2, y),
-    ]).then(([color1, color2]) => {
+    this._sampleStrip(monitor.x, y, monitor.width).then(colors => {
+      this._sampling = false;
+
       if (!this._enabled) {
         return;
       }
 
-      this._debug(`sampled ${JSON.stringify([color1, color2])} ` +
+      this._debug(`sampled ${JSON.stringify(colors)} ` +
         `overview.visible=${Main.overview.visible} animationInProgress=${Main.overview.animationInProgress}`);
       // Don't adopt the overview's backdrop as the panel color.
       if (Main.overview.visible) {
         return;
       }
 
-      // In case one window is half-maximized either on the left or the
-      // right side, find the side where the color is lightest or darkest,
-      // since windows tend to be either light or dark and wallpapers
-      // between. Also, note the chosen midpoint, which controls what
-      // happens when one light window and one dark window are
-      // half-maximized. Raising that value above 128 favors dark.
-      const distance = c => Math.abs(c.r - 155) + Math.abs(c.g - 155) + Math.abs(c.b - 155);
-      let color = color2;
-
-      if (distance(color1) > distance(color2)) {
-        color = color1;
-      }
-
-
-      const bg = `${color.r}, ${color.g}, ${color.b}`;
+      const bg = prevalentColor(colors.map(c => [c.r, c.g, c.b])).join(", ");
       const maximized = this._hasMaximizedWindow();
       // Maximize state flips before the window animation ends, so a quick
       // sample would change opacity ahead of the color. Leave that to the
@@ -510,6 +678,7 @@ export default class PanelColorMatcher extends Extension {
 
       this._applyStyle(bg, maximized);
     }).catch(e => {
+      this._sampling = false;
       console.error("Color sampling failed:", e);
     });
   }

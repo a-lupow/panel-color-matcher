@@ -41,14 +41,10 @@ export default class PanelColorMatcherPreferences extends ExtensionPreferences {
         const gradientOpacityRow = addPercentRow("gradient-opacity", "Gradient Bottom Opacity",
                                                  "Panel background opacity in percent at the bottom edge");
         settings.bind("gradient", gradientOpacityRow, "sensitive", Gio.SettingsBindFlags.GET);
-        const compensateRow = new Adw.SwitchRow({
-            title: "Compensate Brightness",
-            subtitle: "Darken and saturate the panel color as opacity decreases",
-        });
-        settings.bind("compensate-brightness", compensateRow, "active", Gio.SettingsBindFlags.DEFAULT);
-        group.add(compensateRow);
+        addPercentRow("brightness-compensation", "Brightness Compensation",
+                      "How strongly bright panel colors are darkened and saturated for the white text, in percent");
         addPercentRow("text-contrast", "Text Contrast",
-                      "How strongly bright colors are darkened for the white text, in percent");
+                      "How bright the panel may get before it's darkened, or the text turns dark, in percent");
         const invertRow = new Adw.SwitchRow({
             title: "Dark Text on Bright Colors",
             subtitle: "Turn the text and symbolic icons black instead of darkening colors " +
@@ -56,6 +52,12 @@ export default class PanelColorMatcherPreferences extends ExtensionPreferences {
         });
         settings.bind("invert-text", invertRow, "active", Gio.SettingsBindFlags.DEFAULT);
         group.add(invertRow);
+        const shadowRow = new Adw.SwitchRow({
+            title: "Text Shadow",
+            subtitle: "Outline the text and symbolic icons with a soft shadow in the opposite color",
+        });
+        settings.bind("text-shadow", shadowRow, "active", Gio.SettingsBindFlags.DEFAULT);
+        group.add(shadowRow);
         const accentRow = new Adw.SwitchRow({
             title: "Accent Color from Wallpaper",
             subtitle: "Set the system accent color to the closest match to the wallpaper",
