@@ -12,6 +12,29 @@ export const luma = (r, g, b) => 0.299 * r + 0.587 * g + 0.114 * b;
 // less.
 const MAX_DIM = 0.4;
 
+// Shadow and darkening calibration: dimBase is how much compensation at
+// full strength dims any backdrop, however dark, on top of MAX_DIM for
+// white; the text shadow's alpha goes from minAlpha at high contrast to
+// maxAlpha at low, and gain thickens the blurred glyph coverage, so thin
+// text under a wide blur still darkens what's around it; spread is the
+// shadow's tap spacing in px (its blur is about 6 x spread wide), and
+// vivid the base HSV saturation boost of the panel color. Even at high
+// contrast, e.g. white over a dark forest, the shadow must visibly deepen
+// the panel around the text; minAlpha 0.35 left it invisible there.
+//
+// The blur behind a gradient is deepened pixel by pixel, see
+// blendStrength(): blend is how strongly at the top edge, always, and
+// compBlend how much more at full brightness compensation; darkWeight is
+// how strongly a black pixel is deepened relative to a white one; mul is
+// the share of plain multiply against soft light, which darkens the
+// weaker channels more and so makes colors more vivid (0 is all soft
+// light); tint is the share
+// of the configured opacity left to the flat panel color over the blur.
+export const R = {
+  dimBase: 0.1, minAlpha: 0.75, maxAlpha: 0.9, gain: 1.5, spread: 2, vivid: 0.35,
+  blend: 0.5, compBlend: 0.3, darkWeight: 0.5, mul: -1, tint: 0.3,
+};
+
 // Darkened colors look muddy, so push the channels away from their gray by
 // the given factor (1 keeps the color). This keeps the luma, so contrast
 // caps computed before still hold.
@@ -28,12 +51,107 @@ function saturate(rgb, amount) {
   return [r, g, b];
 }
 
+// The panel is always this much as bright as the backdrop, so it reads as
+// a smooth deepening of the wallpaper rather than a flat copy of it.
+const BASE_DARKEN = 0.88;
+
+// The panel never goes darker than this share of the backdrop's
+// brightness, so however bright the backdrop, it stays a tint of it
+// rather than turning black.
+const MIN_DARKEN = 1 / 3;
+
+// HSV saturation boost of the panel color: always R.vivid, plus
+// VIVID_DARK for each unit of darkening, so a deeper panel stays as
+// colorful as the backdrop instead of looking dimmed.
+export const VIVID_DARK = 0.6;
+
+// Return how strongly (0-1) to deepen the blur behind a gradient panel at
+// its top edge, for brightness compensation strength compensate (0-1).
+// One flat panel color can't match a backdrop of several, e.g. a dark rock
+// beside a blue sky, so the deepening is done on each blur pixel from its
+// own color, see deepenPixel(). Dark text needs the backdrop bright.
+export function blendStrength(compensate, darkText) {
+  if (darkText) {
+    return 0;
+  }
+
+  return R.blend + R.compBlend * compensate;
+}
+
+// Return those of the samples, taken evenly across width, that lie under
+// the span from x0 to x1, widened by one sample spacing on both sides, so
+// that a narrow section such as the clock still gets a few; else the one
+// nearest to the span's middle.
+export function samplesUnder(samples, x0, x1, width) {
+  const step = width / samples.length;
+  const under = samples.filter((_, i) => {
+    const x = (i + 0.5) * step;
+
+    return x >= x0 - step && x <= x1 + step;
+  });
+
+  if (under.length > 0) {
+    return under;
+  }
+
+  const middle = Math.floor((x0 + x1) / 2 / step);
+
+  return [samples[Math.min(samples.length - 1, Math.max(0, middle))]];
+}
+
+// Return the blur pixel rgb (0-1 channels) deepened at strength (0-1),
+// as the blur shader in extension.js does; kept here to test the math.
+// Brighter pixels are deepened more, as the white text needs. Within a
+// pixel, a weaker channel loses more, in proportion to how far it is
+// from white compared with the pixel's luma, like soft light against a
+// dark layer, so colors turn more vivid with their hue kept, while a gray
+// pixel just darkens by the amount. Soft light alone would deepen dark
+// pixels most, the reverse of what white text needs. No channel loses
+// more than two thirds, so the blur stays a tint, never black.
+export function deepenPixel(rgb, strength) {
+  const l = luma(...rgb);
+  const amount = strength * (R.darkWeight + (1 - R.darkWeight) * l);
+
+  return rgb.map(c => {
+    const weight = R.mul + (1 - R.mul) * (1 - c) / Math.max(1 - l, 0.05);
+
+    return c * Math.max(1 / 3, 1 - amount * weight);
+  });
+}
+
+// Return rgb with its HSV saturation boosted for a color darkened by dark
+// (0-1). The strongest channel stays, the weaker ones move away from it,
+// so the hue holds and grays stay gray. This only ever lowers channels,
+// so it never raises the luma past a cap computed before.
+function vivid(rgb, dark) {
+  const max = Math.max(...rgb);
+  const min = Math.min(...rgb);
+
+  if (max === min) {
+    return [...rgb];
+  }
+
+  // Stop at full saturation, where the weakest channel reaches 0.
+  const boost = Math.min(1 + R.vivid + VIVID_DARK * dark, max / (max - min));
+
+  return rgb.map(c => max - (max - c) * boost);
+}
+
+// Return the backdrop color bg darkened to k of its brightness and made
+// the more vivid the darker it gets.
+function deepen(bg, k) {
+  return vivid(bg.map(c => c * k), 1 - k).map(Math.floor);
+}
+
 // Return the panel { rgb: [r, g, b], darkText } for the sampled backdrop
 // color bg, opacity (0-1), brightness compensation strength (0-1),
 // text-contrast strength (0-1), whether to switch to dark text instead of
-// darkening the color and whether the panel is a gradient.
+// darkening the color and whether the panel is a gradient. The panel is
+// always a vivid, darker shade of the backdrop, between BASE_DARKEN and
+// MIN_DARKEN of its brightness, never black.
 export function panelColor(bg, opacity, compensate, strength, invert, gradient) {
-  let [r, g, b] = bg;
+  const backdropLuma = luma(...bg);
+  let k = BASE_DARKEN;
 
   if (compensate > 0 && opacity > 0) {
     // A backdrop close in brightness to the white text needs a darker
@@ -41,27 +159,15 @@ export function panelColor(bg, opacity, compensate, strength, invert, gradient) 
     // the blend of it and the backdrop, in proportion to the color's
     // brightness, by up to MAX_DIM for white at full strength. The panel
     // can only dim the blend by its own opacity, so a translucent panel
-    // darkens its color more for the same dimming, down to black.
-    // Darkening washes colors out, so boost saturation slightly too. Keep
-    // at least a third of the brightness, so the panel stays tinted rather
-    // than black, at the cost of dimming less on a very translucent panel.
-    const dim = compensate * MAX_DIM * luma(r, g, b) / 255;
-    const k = Math.max(1 / 3, 1 - dim / opacity);
-    [r, g, b] = saturate([r, g, b].map(c => c * k), 1 + 0.5 * (1 - k)).map(Math.round);
+    // darkens its color more for the same dimming.
+    const dim = compensate * (R.dimBase + MAX_DIM * backdropLuma / 255);
+    k = Math.min(k, 1 - dim / opacity);
   }
 
-  // The panel text is white, so darken the color until the result keeps
-  // enough contrast. A translucent panel shows roughly the sampled color
-  // beneath it, so cap the blend of both rather than the color alone.
-  // If the backdrop alone is too bright, this goes as dark as it can.
-  const panelLuma = luma(r, g, b);
-  const backdropLuma = luma(...bg);
-  const blendedLuma = opacity * panelLuma + (1 - opacity) * backdropLuma;
-  const maxLuma = 255 - (255 - MIN_MAX_LUMA) * strength;
-
+  k = Math.max(MIN_DARKEN, k);
   // A gradient fades into the backdrop around the text, so there judge
   // the backdrop itself, not its blend with a compensated, darker color.
-  let textLuma = blendedLuma;
+  let textLuma = opacity * luma(...deepen(bg, k)) + (1 - opacity) * backdropLuma;
 
   if (gradient) {
     textLuma = backdropLuma;
@@ -70,26 +176,33 @@ export function panelColor(bg, opacity, compensate, strength, invert, gradient) 
   // Pick the text color that reads better where the text sits, leaning
   // to white by 1 / strength: at full strength whichever has more
   // contrast, at a third black needs three times white's, at zero never.
-  // Dark text needs no darkening, so it gets the uncompensated color.
+  // Compensation only helps white text, so dark text gets the backdrop
+  // darkened by the base amount alone.
   if (invert && strength > 0 && contrast(0, textLuma) > contrast(255, textLuma) / strength) {
-    return { rgb: [...bg], darkText: true, contrast: contrast(0, textLuma) };
+    return { rgb: deepen(bg, BASE_DARKEN), darkText: true, contrast: contrast(0, textLuma) };
   }
 
-  if (blendedLuma > maxLuma && opacity > 0 && panelLuma > 0) {
-    const k = Math.max(0, (maxLuma - (1 - opacity) * backdropLuma) / (opacity * panelLuma));
-    // Boost saturation in proportion to how much was darkened, up to double.
-    [r, g, b] = saturate([r, g, b].map(c => c * k), 2 - k);
-    // Floor so rounding can't push the luma back over the cap.
-    [r, g, b] = [r, g, b].map(Math.floor);
+  // The panel text is white, so darken the color until the result keeps
+  // enough contrast. A translucent panel shows roughly the sampled color
+  // beneath it, so cap the blend of both rather than the color alone.
+  // MIN_DARKEN wins over the cap, so a very bright backdrop behind a
+  // translucent panel keeps a tinted panel and leaves the rest of the
+  // contrast to the text shadow.
+  const maxLuma = 255 - (255 - MIN_MAX_LUMA) * strength;
+
+  if (opacity > 0 && backdropLuma > 0) {
+    const cap = (maxLuma - (1 - opacity) * backdropLuma) / (opacity * backdropLuma);
+    k = Math.max(MIN_DARKEN, Math.min(k, cap));
   }
 
-  textLuma = opacity * luma(r, g, b) + (1 - opacity) * backdropLuma;
+  const rgb = deepen(bg, k);
+  textLuma = opacity * luma(...rgb) + (1 - opacity) * backdropLuma;
 
   if (gradient) {
     textLuma = backdropLuma;
   }
 
-  return { rgb: [r, g, b], darkText: false, contrast: contrast(255, textLuma) };
+  return { rgb, darkText: false, contrast: contrast(255, textLuma) };
 }
 
 // WCAG contrast ratio of two 0-255 lumas, approximating relative
@@ -108,21 +221,16 @@ export function darkTextColor(rgb) {
   return saturate(rgb.map(c => c * 0.2), 2).map(Math.round);
 }
 
-// Return the text-shadow [r, g, b, alpha] for the panel color rgb. Behind
-// white text that's a darker tint of the panel color, and behind dark text
-// a lighter one. Plain darkening would look the same as translucent black,
-// so boost saturation to make the tint show. The shadow is there to rescue
-// contrast, so it's the stronger the less contrast the text has: barely
-// there at 10:1, full at 2:1.
-export function shadowColor(rgb, darkText, textContrast) {
+// Return the text-shadow [r, g, b, alpha] for the panel color rgb: the
+// panel color itself, so the shadow blends into the panel as the same
+// smooth, vivid deepening of the backdrop rather than a dark stain. The
+// shadow is there to rescue contrast, so it's the stronger the less
+// contrast the text has: minAlpha at 10:1, maxAlpha at 2:1.
+export function shadowColor(rgb, textContrast) {
   const need = Math.min(1, Math.max(0, Math.log(10 / textContrast) / Math.log(10 / 2)));
-  const alpha = Math.round((0.35 + 0.55 * need) * 100) / 100;
+  const alpha = Math.round((R.minAlpha + (R.maxAlpha - R.minAlpha) * need) * 100) / 100;
 
-  if (darkText) {
-    return [...rgb.map(c => Math.round(c + (255 - c) * 0.75)), alpha];
-  }
-
-  return [...saturate(rgb.map(c => c * 0.35), 3).map(Math.round), alpha];
+  return [...rgb, alpha];
 }
 
 // Samples this far apart, as the sum of channel differences, no longer

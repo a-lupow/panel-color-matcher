@@ -11,7 +11,9 @@ import Shell from "gi://Shell";
 import * as Main from "resource:///org/gnome/shell/ui/main.js";
 import { Extension } from "resource:///org/gnome/shell/extensions/extension.js";
 
-import { accentFromPixels, darkTextColor, panelColor, prevalentColor, shadowColor } from "./color.js";
+import {
+  R, accentFromPixels, blendStrength, darkTextColor, panelColor, prevalentColor, samplesUnder, shadowColor,
+} from "./color.js";
 
 Gio._promisify(Gio.File.prototype, "load_contents_async");
 Gio._promisify(Gio.File.prototype, "read_async");
@@ -42,6 +44,9 @@ const SHADOW_EFFECT_NAME = "panel-color-matcher-shadow";
 
 // Fades an actor vertically, multiplying its premultiplied color by an
 // alpha going from topAlpha at the top edge to bottomAlpha at the bottom.
+// It also deepens each pixel from its own color, at strength at the top
+// edge fading to none at the bottom, as deepenPixel() in color.js does, so
+// every part of the backdrop deepens in its own hue.
 const GradientMaskEffect = GObject.registerClass({
   GTypeName: "PanelColorMatcherGradientMaskEffect",
 }, class GradientMaskEffect extends Shell.GLSLEffect {
@@ -49,8 +54,17 @@ const GradientMaskEffect = GObject.registerClass({
   vfunc_build_pipeline() {
     this.add_glsl_snippet(
       Cogl.SnippetHook.FRAGMENT,
-      "uniform float top_alpha;\nuniform float bottom_alpha;",
-      "cogl_color_out *= mix(top_alpha, bottom_alpha, cogl_tex_coord_in[0].t);",
+      "uniform float top_alpha;\nuniform float bottom_alpha;\nuniform float strength;\n" +
+      "uniform float dark_weight;\nuniform float mul;",
+      `float t = cogl_tex_coord_in[0].t;
+      float a = max(cogl_color_out.a, 0.0001);
+      vec3 c = cogl_color_out.rgb / a;
+      float l = dot(c, vec3(0.299, 0.587, 0.114));
+      float amount = strength * (1.0 - t) * mix(dark_weight, 1.0, l);
+      vec3 weight = mul + (1.0 - mul) * (1.0 - c) / max(1.0 - l, 0.05);
+      c *= max(vec3(1.0 / 3.0), 1.0 - amount * weight);
+      cogl_color_out.rgb = c * a;
+      cogl_color_out *= mix(top_alpha, bottom_alpha, t);`,
       false);
   }
 
@@ -62,24 +76,30 @@ const GradientMaskEffect = GObject.registerClass({
     super.vfunc_paint(node, paintContext, flags | Clutter.EffectPaintFlags.ACTOR_DIRTY);
   }
 
-  setAlphas(top, bottom) {
-    if (top === this._top && bottom === this._bottom) {
+  setAlphas(top, bottom, strength) {
+    if (top === this._top && bottom === this._bottom && strength === this._strength) {
       return;
     }
 
     this._top = top;
     this._bottom = bottom;
+    this._strength = strength;
     this.set_uniform_float(this.get_uniform_location("top_alpha"), 1, [top]);
     this.set_uniform_float(this.get_uniform_location("bottom_alpha"), 1, [bottom]);
+    this.set_uniform_float(this.get_uniform_location("strength"), 1, [strength]);
+    this.set_uniform_float(this.get_uniform_location("dark_weight"), 1, [R.darkWeight]);
+    this.set_uniform_float(this.get_uniform_location("mul"), 1, [R.mul]);
     this.queue_repaint();
   }
 
 });
 
 // Draws a soft shadow beneath everything an actor paints, cast from its
-// alpha 2 px down with a Gaussian blur of about 12 px, in shadow_color
-// (straight, not premultiplied). It samples a 9x9 grid 3 px apart, which
-// the texture's linear filtering smooths between.
+// alpha 2 px down with a Gaussian blur of about 6 x spread px, in shadow_color
+// (straight, not premultiplied), its coverage thickened by gain. It
+// samples a 13x13 grid spread px apart, Gaussian with a sigma of 3 taps,
+// which the texture's linear filtering smooths between. A sparser grid
+// shows as a dotted pattern once spread exceeds about 3 px.
 const ShadowEffect = GObject.registerClass({
   GTypeName: "PanelColorMatcherShadowEffect",
 }, class ShadowEffect extends Shell.GLSLEffect {
@@ -87,20 +107,20 @@ const ShadowEffect = GObject.registerClass({
   vfunc_build_pipeline() {
     this.add_glsl_snippet(
       Cogl.SnippetHook.FRAGMENT,
-      "uniform vec4 shadow_color;\nuniform vec2 pixel_size;",
+      "uniform vec4 shadow_color;\nuniform vec2 pixel_size;\nuniform float gain;\nuniform float spread;",
       `vec2 uv = cogl_tex_coord_in[0].st - vec2(0.0, 2.0) * pixel_size;
       float alpha = 0.0;
       float total = 0.0;
 
-      for (int x = -4; x <= 4; x++) {
-        for (int y = -4; y <= 4; y++) {
-          float w = exp(-float(x * x + y * y) / 8.0);
-          alpha += w * texture2D(cogl_sampler0, uv + vec2(float(x), float(y)) * 3.0 * pixel_size).a;
+      for (int x = -6; x <= 6; x++) {
+        for (int y = -6; y <= 6; y++) {
+          float w = exp(-float(x * x + y * y) / 18.0);
+          alpha += w * texture2D(cogl_sampler0, uv + vec2(float(x), float(y)) * spread * pixel_size).a;
           total += w;
         }
       }
 
-      vec4 shadow = vec4(shadow_color.rgb, 1.0) * shadow_color.a * (alpha / total) * cogl_color_in.a;
+      vec4 shadow = vec4(shadow_color.rgb, 1.0) * shadow_color.a * min(1.0, gain * alpha / total) * cogl_color_in.a;
       cogl_color_out += shadow * (1.0 - cogl_color_out.a);`,
       false);
   }
@@ -113,6 +133,8 @@ const ShadowEffect = GObject.registerClass({
       this._width = width;
       this._height = height;
       this.set_uniform_float(this.get_uniform_location("pixel_size"), 2, [1 / width, 1 / height]);
+      this.set_uniform_float(this.get_uniform_location("gain"), 1, [R.gain]);
+      this.set_uniform_float(this.get_uniform_location("spread"), 1, [R.spread]);
     }
 
     super.vfunc_paint(node, paintContext, flags);
@@ -227,6 +249,8 @@ export default class PanelColorMatcher extends Extension {
 
     this._enabled = true;
     this._bg = null;
+    this._samples = null;
+    this._samplesKey = null;
     this._style = null;
     this._maximized = false;
     this._updateTimeout = null;
@@ -285,6 +309,8 @@ export default class PanelColorMatcher extends Extension {
     Main.panel.remove_style_class_name(TEXT_SHADOW_CLASS);
     Main.panel.set_style(null);
     this._bg = null;
+    this._samples = null;
+    this._samplesKey = null;
     this._style = null;
   }
 
@@ -418,16 +444,20 @@ export default class PanelColorMatcher extends Extension {
     });
   }
 
-  _applyStyle(bg, maximized) {
+  _applyStyle(bg, maximized, samples) {
     // Restyle only the panel subtree instead of reloading the theme,
     // which would restyle the whole stage. The theme's transition-duration
     // on #panel and .panel-button makes St crossfade the change.
-    if (bg === this._bg && maximized === this._maximized) {
+    const samplesKey = samples.join(";");
+
+    if (bg === this._bg && maximized === this._maximized && samplesKey === this._samplesKey) {
       return;
     }
 
     this._bg = bg;
     this._maximized = maximized;
+    this._samples = samples;
+    this._samplesKey = samplesKey;
     this._syncBackground();
   }
 
@@ -440,10 +470,11 @@ export default class PanelColorMatcher extends Extension {
     return group?.get_children().find(c => c.name === BLUR_WIDGET_NAME) ?? null;
   }
 
-  _syncBlurMask(bottomOpacity) {
+  _syncBlurMask(bottomOpacity, strength = 0) {
     // The blur is its own actor behind the panel, so the panel's gradient
     // can't make it transparent. Fade it with the same vertical gradient,
-    // from full blur at the top to bottomOpacity, or drop the mask on null.
+    // from full blur at the top to bottomOpacity, deepened at strength at
+    // the top, or drop the mask on null.
     const actor = this._blurActor();
 
     if (!actor) {
@@ -467,7 +498,7 @@ export default class PanelColorMatcher extends Extension {
       actor.add_effect_with_name(BLUR_MASK_NAME, effect);
     }
 
-    effect.setAlphas(1, bottomOpacity);
+    effect.setAlphas(1, bottomOpacity, strength);
   }
 
   _hasMaximizedWindow() {
@@ -501,14 +532,19 @@ export default class PanelColorMatcher extends Extension {
     }
   }
 
-  _syncShadowEffect(color) {
+  _sectionBoxes() {
+    return [Main.panel._leftBox, Main.panel._centerBox, Main.panel._rightBox];
+  }
+
+  _syncShadowEffect(colors) {
     // Shadow everything each section draws, whatever kind of actor, from
-    // a tinted [r, g, b, alpha] color, or remove the shadow on null. The
-    // panel background sits on the panel itself, so it casts none.
-    for (const box of [Main.panel._leftBox, Main.panel._centerBox, Main.panel._rightBox]) {
+    // its tinted [r, g, b, alpha] color, one per section in the order of
+    // _sectionBoxes(), or remove the shadows on null. The panel background
+    // sits on the panel itself, so it casts none.
+    for (const [i, box] of this._sectionBoxes().entries()) {
       let effect = box.get_effect(SHADOW_EFFECT_NAME);
 
-      if (color === null) {
+      if (colors === null) {
         if (effect) {
           box.remove_effect(effect);
         }
@@ -521,8 +557,35 @@ export default class PanelColorMatcher extends Extension {
         box.add_effect_with_name(SHADOW_EFFECT_NAME, effect);
       }
 
-      effect.setColor(color);
+      effect.setColor(colors[i]);
     }
+  }
+
+  _sectionShadows(panel, opacity, compensate, strength, gradient) {
+    // Behind a gradient each section shows its own part of the backdrop,
+    // e.g. the clock a blue sky while the left a dark rock decides the
+    // panel color, so shade each from the samples beneath it, as the same
+    // vivid deepening the panel color is. The text color is one for the
+    // whole panel, so keep white text's colors even where the backdrop
+    // alone would get dark text. Dark text and a solid panel, which shows
+    // its one color everywhere, keep the panel's own.
+    const boxes = this._sectionBoxes();
+
+    if (!gradient || panel.darkText || !this._samples) {
+      return boxes.map(() => shadowColor(panel.rgb, panel.contrast));
+    }
+
+    const monitor = global.display.get_monitor_geometry(global.display.get_primary_monitor());
+
+    return boxes.map(box => {
+      const [x] = box.get_transformed_position();
+      const x0 = x - monitor.x;
+      const local = panelColor(
+        prevalentColor(samplesUnder(this._samples, x0, x0 + box.width, monitor.width)),
+        opacity, compensate, strength, false, gradient);
+
+      return shadowColor(local.rgb, local.contrast);
+    });
   }
 
   _setOverviewShowing(showing) {
@@ -569,32 +632,43 @@ export default class PanelColorMatcher extends Extension {
 
     // The text sits mid-height, where a gradient has the mean of its ends,
     // so judge brightness and contrast at that opacity.
-    const { rgb: [r, g, b], darkText, contrast } = panelColor(
-      this._bg.split(",").map(Number),
-      (opacity + bottomOpacity) / 2,
-      this._settings.get_int("brightness-compensation") / 100,
-      this._settings.get_int("text-contrast") / 100,
-      this._settings.get_boolean("invert-text"),
-      gradient);
+    const bg = this._bg.split(",").map(Number);
+    const meanOpacity = (opacity + bottomOpacity) / 2;
+    const compensate = this._settings.get_int("brightness-compensation") / 100;
+    const strength = this._settings.get_int("text-contrast") / 100;
+    const panel = panelColor(
+      bg, meanOpacity, compensate, strength, this._settings.get_boolean("invert-text"), gradient);
+    const { rgb: [r, g, b], darkText } = panel;
     this._syncDarkText(darkText);
-    const top = `rgba(${r}, ${g}, ${b}, ${opacity})`;
 
     if (gradient) {
+      // The blur deepens each part of the backdrop in its own color, so
+      // the one flat panel color over it, which can't follow a backdrop of
+      // several, only tints at R.tint of the opacity. Without the blur, the
+      // panel color does all the work at the full opacity.
+      let tint = 1;
+
+      if (this._blurActor()) {
+        tint = R.tint;
+      }
+
       // St draws gradients with alpha, so the transparent end shows what is
       // behind the panel. The start color doubles as background-color,
       // overriding the theme's.
-      const bottom = `rgba(${r}, ${g}, ${b}, ${bottomOpacity})`;
+      const top = `rgba(${r}, ${g}, ${b}, ${opacity * tint})`;
+      const bottom = `rgba(${r}, ${g}, ${b}, ${bottomOpacity * tint})`;
       this._style = "background-gradient-direction: vertical; " +
         `background-gradient-start: ${top}; background-gradient-end: ${bottom};`;
-      this._syncBlurMask(bottomOpacity);
+      this._syncBlurMask(bottomOpacity, blendStrength(compensate, darkText));
     } else {
+      const top = `rgba(${r}, ${g}, ${b}, ${opacity})`;
       this._style = `background-color: ${top};`;
       this._syncBlurMask(null);
     }
 
     // Each section of the panel casts one shadow from all it draws.
     if (this._settings.get_boolean("text-shadow")) {
-      this._syncShadowEffect(shadowColor([r, g, b], darkText, contrast));
+      this._syncShadowEffect(this._sectionShadows(panel, meanOpacity, compensate, strength, gradient));
     } else {
       this._syncShadowEffect(null);
     }
@@ -667,7 +741,8 @@ export default class PanelColorMatcher extends Extension {
         return;
       }
 
-      const bg = prevalentColor(colors.map(c => [c.r, c.g, c.b])).join(", ");
+      const samples = colors.map(c => [c.r, c.g, c.b]);
+      const bg = prevalentColor(samples).join(", ");
       const maximized = this._hasMaximizedWindow();
       // Maximize state flips before the window animation ends, so a quick
       // sample would change opacity ahead of the color. Leave that to the
@@ -676,7 +751,7 @@ export default class PanelColorMatcher extends Extension {
         return;
       }
 
-      this._applyStyle(bg, maximized);
+      this._applyStyle(bg, maximized, samples);
     }).catch(e => {
       this._sampling = false;
       console.error("Color sampling failed:", e);

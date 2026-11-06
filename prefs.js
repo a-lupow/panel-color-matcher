@@ -54,7 +54,7 @@ export default class PanelColorMatcherPreferences extends ExtensionPreferences {
         group.add(invertRow);
         const shadowRow = new Adw.SwitchRow({
             title: "Text Shadow",
-            subtitle: "Outline the text and symbolic icons with a soft shadow in the opposite color",
+            subtitle: "Outline the text and symbolic icons with a soft shadow in the panel color",
         });
         settings.bind("text-shadow", shadowRow, "active", Gio.SettingsBindFlags.DEFAULT);
         group.add(shadowRow);
