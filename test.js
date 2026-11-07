@@ -3,7 +3,7 @@
 
 import {
   MIN_MAX_LUMA, R, accentFromPixels, blendStrength, contrast, darkTextColor, deepenPixel, luma, panelColor,
-  prevalentColor, samplesUnder, shadowColor,
+  prevalentColor, samplesUnder, shadowFactors,
 } from "./color.js";
 
 const assert = (ok, message) => {
@@ -94,16 +94,32 @@ const paleSky = panelColor([196, 204, 214], 0.175, 0.6, 0.35, true, true);
 assert(paleSky.rgb.join() === panelColor([196, 204, 214], 1, 0, 0).rgb.join(),
        "dark text must get the uncompensated, base-darkened color");
 
-// The shadow is the panel color itself, so it blends in smoothly.
-assert(shadowColor([184, 61, 122], 3).slice(0, 3).join() === "184,61,122",
-       "the shadow must be the panel color");
-// The shadow is the stronger the less contrast the text has.
-assert(shadowColor([40, 40, 40], 12)[3] === R.minAlpha && R.minAlpha >= 0.5,
-       "high contrast must still get a visible shadow");
-assert(shadowColor([180, 180, 180], 1.5)[3] === R.maxAlpha,
-       "low contrast must get a strong shadow");
-assert(shadowColor([180, 180, 180], 3)[3] > shadowColor([180, 180, 180], 5)[3],
+// The shadow is stronger the less contrast the text has.
+const shadowSky = [90, 136, 173];
+assert(shadowFactors(shadowSky, 12, 0.5, 0).every(k => k === Math.round((1 - 0.5 * R.shadowHold) * 100) / 100),
+       "high contrast must keep the held share of the opacity");
+assert(shadowFactors(shadowSky, 1, 0.5, 0).every(k => k === 0.5),
+       "low contrast must get the full opacity");
+assert(shadowFactors(shadowSky, 3, 0.5, 0)[0] < shadowFactors(shadowSky, 5, 0.5, 0)[0],
        "less contrast must get a stronger shadow");
+assert(shadowFactors(shadowSky, 1, 0, 1).every(k => k === 1),
+       "zero opacity must leave the backdrop as is");
+// Without vibrance it's neutral, with it the backdrop's own hue, deeper.
+assert(shadowFactors(shadowSky, 3, 0.5, 0).every((k, _, a) => k === a[0]),
+       "no vibrance must darken every channel alike");
+// Vibrance on its own, without the headroom vivid colors get.
+const headroom = R.headroom;
+R.headroom = 0;
+const vividSky = shadowFactors(shadowSky, 3, 0.5, 1);
+assert(vividSky[2] > vividSky[1] && vividSky[1] > vividSky[0],
+       "vibrance must darken the weaker channels more, keeping the blue");
+assert(vividSky[2] === shadowFactors(shadowSky, 3, 0.5, 0)[2] && vividSky[0] < 0.1,
+       "full vibrance must keep the strongest channel's darkening and nearly saturate");
+R.headroom = headroom;
+assert(shadowFactors(shadowSky, 3, 0.5, 1)[0] > vividSky[0],
+       "headroom must hold back a vivid backdrop's shadow saturation");
+assert(shadowFactors([128, 128, 128], 3, 0.5, 1).join() === shadowFactors([128, 128, 128], 3, 0.5, 0).join(),
+       "vibrance must leave a gray backdrop's shadow neutral");
 
 // The blur deepens pixel by pixel, always a bit and more with compensation.
 assert(blendStrength(0, false) > 0, "the blur must always deepen a bit");
@@ -186,5 +202,13 @@ assert(image([128, 128, 128]) === "slate", "gray must fall back to slate");
 assert(image([5, 5, 40]) === "slate", "near-black must fall back to slate");
 assert(image([40, 200, 60], [40, 200, 60], [40, 200, 60], [140, 60, 180]) === "green",
        "the most prominent hue must win");
+
+// A vivid, bright pixel deepens in its own hue rather than burning: no
+// channel brightens or clips, and red keeps a share of its brightness
+// close to the other channels'.
+const burnt = deepenPixel([226, 106, 115].map(c => c / 255), blendStrength(0.25, false)).map(c => c * 255);
+assert(burnt.every(c => c <= 226), "no channel must brighten");
+assert(burnt[0] / 226 < 0.75 && burnt[1] / 106 > 0.4,
+       "a vivid pixel must darken evenly, not burn");
 
 print("ok");

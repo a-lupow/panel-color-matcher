@@ -14,13 +14,10 @@ const MAX_DIM = 0.4;
 
 // Shadow and darkening calibration: dimBase is how much compensation at
 // full strength dims any backdrop, however dark, on top of MAX_DIM for
-// white; the text shadow's alpha goes from minAlpha at high contrast to
-// maxAlpha at low, and gain thickens the blurred glyph coverage, so thin
-// text under a wide blur still darkens what's around it; spread is the
-// shadow's tap spacing in px (its blur is about 6 x spread wide), and
-// vivid the base HSV saturation boost of the panel color. Even at high
-// contrast, e.g. white over a dark forest, the shadow must visibly deepen
-// the panel around the text; minAlpha 0.35 left it invisible there.
+// white; shadowHold is the share of the text shadow's configured opacity
+// it keeps where the text has plenty of contrast, rising to all of it
+// where the text has little, see shadowFactors(); and vivid the base HSV
+// saturation boost of the panel color.
 //
 // The blur behind a gradient is deepened pixel by pixel, see
 // blendStrength(): blend is how strongly at the top edge, always, and
@@ -30,10 +27,28 @@ const MAX_DIM = 0.4;
 // weaker channels more and so makes colors more vivid (0 is all soft
 // light); tint is the share
 // of the configured opacity left to the flat panel color over the blur.
+//
+// Headroom keeps already vivid, bright colors from burning, i.e. turning a
+// glaring pure hue instead of a deeper shade: weightMin and weightMax
+// bound how much each channel of a blur pixel darkens relative to the
+// amount, so the strongest one always darkens too and the weaker ones
+// aren't crushed; headroom is how much a color's chroma (HSV saturation
+// times value, 0-1) holds back the panel color's and the shadow's extra
+// saturation.
 export const R = {
-  dimBase: 0.1, minAlpha: 0.75, maxAlpha: 0.9, gain: 1.5, spread: 2, vivid: 0.35,
+  dimBase: 0.1, shadowHold: 0.7, vivid: 0.35,
   blend: 0.5, compBlend: 0.3, darkWeight: 0.5, mul: -1, tint: 0.3,
+  weightMin: 0.7, weightMax: 1.2, headroom: 0.6,
 };
+
+// Return how much (0-1) of the extra saturation a color rgb (any scale up
+// to full) still takes, by its chroma, see R.headroom.
+function saturationRoom(rgb, full) {
+  const max = Math.max(...rgb);
+  const min = Math.min(...rgb);
+
+  return Math.max(0, 1 - R.headroom * (max - min) / full);
+}
 
 // Darkened colors look muddy, so push the channels away from their gray by
 // the given factor (1 keeps the color). This keeps the luma, so contrast
@@ -109,13 +124,21 @@ export function samplesUnder(samples, x0, x1, width) {
 // pixels most, the reverse of what white text needs. No channel loses
 // more than two thirds, so the blur stays a tint, never black.
 export function deepenPixel(rgb, strength) {
+  const amount = strength * (R.darkWeight + (1 - R.darkWeight) * luma(...rgb));
+
+  return deepenFactors(rgb, amount).map((k, i) => rgb[i] * k);
+}
+
+// Return the factor (0-1) each channel of the pixel rgb (0-1 channels) is
+// multiplied by to deepen it by amount, see deepenPixel().
+function deepenFactors(rgb, amount) {
   const l = luma(...rgb);
-  const amount = strength * (R.darkWeight + (1 - R.darkWeight) * l);
 
   return rgb.map(c => {
-    const weight = R.mul + (1 - R.mul) * (1 - c) / Math.max(1 - l, 0.05);
+    const weight = Math.min(R.weightMax, Math.max(R.weightMin,
+      R.mul + (1 - R.mul) * (1 - c) / Math.max(1 - l, 0.05)));
 
-    return c * Math.max(1 / 3, 1 - amount * weight);
+    return Math.max(MIN_DARKEN, 1 - amount * weight);
   });
 }
 
@@ -132,7 +155,7 @@ function vivid(rgb, dark) {
   }
 
   // Stop at full saturation, where the weakest channel reaches 0.
-  const boost = Math.min(1 + R.vivid + VIVID_DARK * dark, max / (max - min));
+  const boost = Math.min(1 + (R.vivid + VIVID_DARK * dark) * saturationRoom(rgb, 255), max / (max - min));
 
   return rgb.map(c => max - (max - c) * boost);
 }
@@ -221,16 +244,42 @@ export function darkTextColor(rgb) {
   return saturate(rgb.map(c => c * 0.2), 2).map(Math.round);
 }
 
-// Return the text-shadow [r, g, b, alpha] for the panel color rgb: the
-// panel color itself, so the shadow blends into the panel as the same
-// smooth, vivid deepening of the backdrop rather than a dark stain. The
-// shadow is there to rescue contrast, so it's the stronger the less
-// contrast the text has: minAlpha at 10:1, maxAlpha at 2:1.
-export function shadowColor(rgb, textContrast) {
+// Return the text shadow, as the [r, g, b] factors (0-1) the shadow
+// multiplies what's behind it by where it's full, for the color rgb seen
+// behind the text, text with contrast textContrast, and the configured
+// shadow opacity and vibrance (0-1). At no vibrance it's a neutral dark,
+// like macOS's transparent menu bar, darkening every channel alike. With
+// vibrance it's a deeper tone of the backdrop's own hue: the strongest
+// channel still darkens by the opacity, the weaker ones further, so what's
+// behind the text turns a more saturated shade, e.g. navy on a blue sky
+// rather than gray. The darker the shadow, the more it saturates, fully
+// at full vibrance once it darkens by half, so a faint shadow only
+// faintly tints and none leaves the backdrop as is. The shadow is there to rescue contrast, so it's the stronger
+// the less contrast the text has: shadowHold of the opacity at 10:1, all
+// of it at 2:1.
+export function shadowFactors(rgb, textContrast, opacity, vibrance) {
   const need = Math.min(1, Math.max(0, Math.log(10 / textContrast) / Math.log(10 / 2)));
-  const alpha = Math.round((R.minAlpha + (R.maxAlpha - R.minAlpha) * need) * 100) / 100;
+  const k = 1 - opacity * (R.shadowHold + (1 - R.shadowHold) * need);
+  const max = Math.max(...rgb);
+  const min = Math.min(...rgb);
+  const round = f => Math.round(f * 100) / 100;
 
-  return [...rgb, alpha];
+  if (max === min) {
+    return [k, k, k].map(round);
+  }
+
+  // At full saturation the weakest channel reaches 0, so scale each
+  // channel's distance below the strongest by max / (max - min).
+  return rgb.map(c => {
+    const saturated = max - (max - c) * max / (max - min);
+    const target = c + (saturated - c) * vibrance * saturationRoom(rgb, 255) * Math.min(1, 2 * (1 - k));
+
+    if (c === 0) {
+      return round(k);
+    }
+
+    return round(k * target / c);
+  });
 }
 
 // Samples this far apart, as the sum of channel differences, no longer

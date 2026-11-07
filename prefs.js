@@ -12,15 +12,15 @@ export default class PanelColorMatcherPreferences extends ExtensionPreferences {
         const settings = this.getSettings();
         const page = new Adw.PreferencesPage();
         const group = new Adw.PreferencesGroup();
-        const addPercentRow = (key, title, subtitle) => {
+        const addSpinRow = (key, title, subtitle, upper = 100, step = 5) => {
             const row = new Adw.SpinRow({
                 title,
                 subtitle,
                 adjustment: new Gtk.Adjustment({
                     lower: 0,
-                    upper: 100,
-                    step_increment: 5,
-                    page_increment: 10,
+                    upper,
+                    step_increment: step,
+                    page_increment: step * 2,
                 }),
             });
             settings.bind(key, row, "value", Gio.SettingsBindFlags.DEFAULT);
@@ -28,6 +28,7 @@ export default class PanelColorMatcherPreferences extends ExtensionPreferences {
 
             return row;
         };
+        const addPercentRow = (key, title, subtitle) => addSpinRow(key, title, subtitle);
         addPercentRow("opacity", "Opacity", "Panel background opacity in percent");
         addPercentRow("maximized-opacity", "Opacity with Maximized Windows",
                       "Panel background opacity in percent while a window is maximized or fullscreen");
@@ -54,10 +55,30 @@ export default class PanelColorMatcherPreferences extends ExtensionPreferences {
         group.add(invertRow);
         const shadowRow = new Adw.SwitchRow({
             title: "Text Shadow",
-            subtitle: "Outline the text and symbolic icons with a soft shadow in the panel color",
+            subtitle: "Cast a soft dark shadow from the text and icons, stronger the less contrast they have",
         });
         settings.bind("text-shadow", shadowRow, "active", Gio.SettingsBindFlags.DEFAULT);
         group.add(shadowRow);
+        const maximizedShadowRow = new Adw.SwitchRow({
+            title: "Shadow with Maximized Windows",
+            subtitle: "When off, hide the shadow only while a window is maximized or fullscreen",
+        });
+        settings.bind("maximized-shadow", maximizedShadowRow, "active", Gio.SettingsBindFlags.DEFAULT);
+        group.add(maximizedShadowRow);
+        const shadowRows = [
+            maximizedShadowRow,
+            addSpinRow("shadow-distance", "Shadow Distance", "How far down the shadow is cast, in pixels", 8, 1),
+            addSpinRow("shadow-radius", "Shadow Radius",
+                       "How far out from the text the shadow fades, in pixels; 0 is sharp", 24, 1),
+            addPercentRow("shadow-opacity", "Shadow Opacity",
+                          "How dark the shadow is next to the text, in percent, where contrast is lowest"),
+            addPercentRow("shadow-vibrance", "Shadow Vibrance",
+                          "How much the shadow takes a deeper tone of the backdrop instead of neutral dark, in percent"),
+        ];
+
+        for (const row of shadowRows) {
+            settings.bind("text-shadow", row, "sensitive", Gio.SettingsBindFlags.GET);
+        }
         const accentRow = new Adw.SwitchRow({
             title: "Accent Color from Wallpaper",
             subtitle: "Set the system accent color to the closest match to the wallpaper",

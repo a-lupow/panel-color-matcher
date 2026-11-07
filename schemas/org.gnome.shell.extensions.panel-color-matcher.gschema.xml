@@ -45,7 +45,36 @@
     <key name="text-shadow" type="b">
       <default>false</default>
       <summary>Text shadow</summary>
-      <description>Outline the panel text and symbolic icons with a soft shadow in the panel color, a vivid darker shade of the backdrop, stronger the less contrast the text has. With the gradient on, each part of the panel takes the shade of the backdrop beneath it.</description>
+      <description>Cast a soft, neutral dark shadow from the panel text and icons onto what's behind them, like macOS's transparent menu bar, stronger the less contrast the text has. Dark text gets none.</description>
+    </key>
+    <key name="maximized-shadow" type="b">
+      <default>true</default>
+      <summary>Text shadow with maximized windows</summary>
+      <description>Keep the text shadow while a maximized or fullscreen window is on the primary monitor. When off, the shadow is hidden only while such a window is there, and comes back as soon as none is.</description>
+    </key>
+    <key name="shadow-distance" type="i">
+      <range min="0" max="8"/>
+      <default>1</default>
+      <summary>Text shadow distance</summary>
+      <description>How far down the text shadow is cast, in pixels.</description>
+    </key>
+    <key name="shadow-radius" type="i">
+      <range min="0" max="24"/>
+      <default>3</default>
+      <summary>Text shadow radius</summary>
+      <description>How far out from the text and icons the shadow fades, in pixels. 0 gives a sharp shadow.</description>
+    </key>
+    <key name="shadow-opacity" type="i">
+      <range min="0" max="100"/>
+      <default>55</default>
+      <summary>Text shadow opacity</summary>
+      <description>How dark the text shadow is right next to the text, in percent, where the text has the least contrast. Where it has plenty, the shadow keeps 70 % of it.</description>
+    </key>
+    <key name="shadow-vibrance" type="i">
+      <range min="0" max="100"/>
+      <default>50</default>
+      <summary>Text shadow vibrance</summary>
+      <description>How much the text shadow takes on a deeper, more saturated tone of the backdrop's own hue instead of a neutral dark, in percent: 0 is neutral, like macOS, and 100 fully saturated, e.g. navy on a blue sky.</description>
     </key>
     <key name="wallpaper-accent" type="b">
       <default>true</default>

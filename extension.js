@@ -12,7 +12,7 @@ import * as Main from "resource:///org/gnome/shell/ui/main.js";
 import { Extension } from "resource:///org/gnome/shell/extensions/extension.js";
 
 import {
-  R, accentFromPixels, blendStrength, darkTextColor, panelColor, prevalentColor, samplesUnder, shadowColor,
+  R, accentFromPixels, blendStrength, darkTextColor, panelColor, prevalentColor, samplesUnder, shadowFactors,
 } from "./color.js";
 
 Gio._promisify(Gio.File.prototype, "load_contents_async");
@@ -55,13 +55,13 @@ const GradientMaskEffect = GObject.registerClass({
     this.add_glsl_snippet(
       Cogl.SnippetHook.FRAGMENT,
       "uniform float top_alpha;\nuniform float bottom_alpha;\nuniform float strength;\n" +
-      "uniform float dark_weight;\nuniform float mul;",
+      "uniform float dark_weight;\nuniform float mul;\nuniform float weight_min;\nuniform float weight_max;",
       `float t = cogl_tex_coord_in[0].t;
       float a = max(cogl_color_out.a, 0.0001);
       vec3 c = cogl_color_out.rgb / a;
       float l = dot(c, vec3(0.299, 0.587, 0.114));
       float amount = strength * (1.0 - t) * mix(dark_weight, 1.0, l);
-      vec3 weight = mul + (1.0 - mul) * (1.0 - c) / max(1.0 - l, 0.05);
+      vec3 weight = clamp(mul + (1.0 - mul) * (1.0 - c) / max(1.0 - l, 0.05), weight_min, weight_max);
       c *= max(vec3(1.0 / 3.0), 1.0 - amount * weight);
       cogl_color_out.rgb = c * a;
       cogl_color_out *= mix(top_alpha, bottom_alpha, t);`,
@@ -89,66 +89,185 @@ const GradientMaskEffect = GObject.registerClass({
     this.set_uniform_float(this.get_uniform_location("strength"), 1, [strength]);
     this.set_uniform_float(this.get_uniform_location("dark_weight"), 1, [R.darkWeight]);
     this.set_uniform_float(this.get_uniform_location("mul"), 1, [R.mul]);
+    this.set_uniform_float(this.get_uniform_location("weight_min"), 1, [R.weightMin]);
+    this.set_uniform_float(this.get_uniform_location("weight_max"), 1, [R.weightMax]);
     this.queue_repaint();
   }
 
 });
 
-// Draws a soft shadow beneath everything an actor paints, cast from its
-// alpha 2 px down with a Gaussian blur of about 6 x spread px, in shadow_color
-// (straight, not premultiplied), its coverage thickened by gain. It
-// samples a 13x13 grid spread px apart, Gaussian with a sigma of 3 taps,
-// which the texture's linear filtering smooths between. A sparser grid
-// shows as a dotted pattern once spread exceeds about 3 px.
+// Multiplies the stage beneath everything an actor paints by factor, a
+// [r, g, b] in 0-1, as a soft shadow cast from the actor's alpha offset px
+// down. The shadow falls off with the distance to the nearest drawn pixel,
+// as a Gaussian with a sigma of 3 x spread px, fading out at 6 x spread
+// px, so a thin text stroke casts the same shadow as a solid icon.
+// Averaging the alpha around each pixel instead, as a plain blur does,
+// gives solid shapes a much denser shadow than thin text, and builds lines
+// of text up into a dark band. It takes the strongest weighted tap of a
+// disc of taps spread px apart, 6 taps in radius, whose weight drops to
+// exactly 0 at its edge: a square grid cut off at a weight of 0.14 gave
+// every halo square corners and a hard rim.
+//
+// Thin strokes falling between taps leave stripes spread px apart in the
+// halo, so the result is blurred by averaging it at four points in a
+// rotated grid, whose offsets along either axis are a quarter of spread
+// apart, which cancels them out. Wider radii space the taps further than
+// the strokes are thick, so taps read the alpha prefiltered over spread / 2
+// px from the mipmap level lod, as at a radius of 12 on a 1x monitor.
+const SHADOW_SNIPPET = [
+  `uniform float factor_r;
+  uniform float factor_g;
+  uniform float factor_b;
+  uniform float pixel_w;
+  uniform float pixel_h;
+  uniform float spread;
+  uniform float offset;
+  uniform float opacity;
+  uniform float lod;
+
+  float shadow_coverage(sampler2D sampler, vec2 uv, vec2 step, float lod) {
+    float coverage = 0.0;
+
+    for (int x = -6; x <= 6; x++) {
+      for (int y = -6; y <= 6; y++) {
+        float r2 = float(x * x + y * y);
+
+        if (r2 < 36.0) {
+          float w = (exp(-r2 / 18.0) - exp(-2.0)) / (1.0 - exp(-2.0));
+          coverage = max(coverage, w * texture2D(sampler, uv + vec2(float(x), float(y)) * step, lod).a);
+        }
+      }
+    }
+
+    return coverage;
+  }`,
+  `vec2 pixel_size = vec2(pixel_w, pixel_h);
+  vec2 uv = cogl_tex_coord_in[0].st - vec2(0.0, offset) * pixel_size;
+  vec2 step = spread * pixel_size;
+  vec2 j = 0.125 * step;
+  float coverage = 0.25 * (
+    shadow_coverage(cogl_sampler0, uv + vec2(-3.0, -1.0) * j, step, lod) +
+    shadow_coverage(cogl_sampler0, uv + vec2(1.0, -3.0) * j, step, lod) +
+    shadow_coverage(cogl_sampler0, uv + vec2(3.0, 1.0) * j, step, lod) +
+    shadow_coverage(cogl_sampler0, uv + vec2(-1.0, 3.0) * j, step, lod));
+
+  coverage *= opacity;
+  cogl_color_out = vec4(mix(vec3(1.0), vec3(factor_r, factor_g, factor_b), coverage), 1.0);`,
+];
+
+// The shadow pass keeps the stage's alpha and multiplies its color. Cogl's
+// parser rejects an explicit "*(1)" factor, so the 1 is left implicit.
+const SHADOW_BLEND = "RGB = ADD(SRC_COLOR*(DST_COLOR), 0) A = ADD(0, DST_COLOR)";
+
+// Cogl reuses a compiled shader program only for pipelines sharing the same
+// snippet object, not just the same source, so every new snippet compiles
+// another one. Effects come and go with the overview, the lock screen and
+// panel changes, so build the shadow pipeline once per session and give
+// each effect a copy, or programs pile up until Cogl warns of over 50.
+let shadowTemplate = null;
+
+function shadowPipeline() {
+  if (!shadowTemplate) {
+    const context = Clutter.get_default_backend().get_cogl_context();
+    const pipeline = Cogl.Pipeline.new(context);
+    pipeline.add_snippet(Cogl.Snippet.new(Cogl.SnippetHook.FRAGMENT, ...SHADOW_SNIPPET));
+    pipeline.set_blend(SHADOW_BLEND);
+    // Cogl regenerates the mipmaps whenever the section is redrawn.
+    pipeline.set_layer_filters(
+      0, Cogl.PipelineFilter.LINEAR_MIPMAP_LINEAR, Cogl.PipelineFilter.LINEAR);
+    shadowTemplate = pipeline;
+  }
+
+  return shadowTemplate.copy();
+}
+
+// Draws an actor with a dark shadow beneath it, see shadowFactors() in
+// color.js, as a pass of its own that multiplies the stage, before the
+// actor is drawn as is.
 const ShadowEffect = GObject.registerClass({
   GTypeName: "PanelColorMatcherShadowEffect",
 }, class ShadowEffect extends Shell.GLSLEffect {
 
   vfunc_build_pipeline() {
-    this.add_glsl_snippet(
-      Cogl.SnippetHook.FRAGMENT,
-      "uniform vec4 shadow_color;\nuniform vec2 pixel_size;\nuniform float gain;\nuniform float spread;",
-      `vec2 uv = cogl_tex_coord_in[0].st - vec2(0.0, 2.0) * pixel_size;
-      float alpha = 0.0;
-      float total = 0.0;
-
-      for (int x = -6; x <= 6; x++) {
-        for (int y = -6; y <= 6; y++) {
-          float w = exp(-float(x * x + y * y) / 18.0);
-          alpha += w * texture2D(cogl_sampler0, uv + vec2(float(x), float(y)) * spread * pixel_size).a;
-          total += w;
-        }
-      }
-
-      vec4 shadow = vec4(shadow_color.rgb, 1.0) * shadow_color.a * min(1.0, gain * alpha / total) * cogl_color_in.a;
-      cogl_color_out += shadow * (1.0 - cogl_color_out.a);`,
-      false);
+    // The actor itself is drawn unchanged.
   }
 
-  vfunc_paint(node, paintContext, flags) {
-    // The texture spans the actor, so a pixel is 1 / its size.
-    const [width, height] = this.actor.get_size();
-
-    if (width !== this._width || height !== this._height) {
-      this._width = width;
-      this._height = height;
-      this.set_uniform_float(this.get_uniform_location("pixel_size"), 2, [1 / width, 1 / height]);
-      this.set_uniform_float(this.get_uniform_location("gain"), 1, [R.gain]);
-      this.set_uniform_float(this.get_uniform_location("spread"), 1, [R.spread]);
+  vfunc_paint_target(node, paintContext) {
+    if (this._factors) {
+      this._paintShadow(node);
     }
 
-    super.vfunc_paint(node, paintContext, flags);
+    super.vfunc_paint_target(node, paintContext);
   }
 
-  setColor(color) {
-    // color is [r, g, b] in 0-255 and alpha in 0-1.
-    if (color.join() === this._color?.join()) {
+  _paintShadow(node) {
+    const texture = this.get_texture();
+
+    if (!texture) {
       return;
     }
 
-    this._color = color;
-    const [r, g, b, alpha] = color;
-    this.set_uniform_float(this.get_uniform_location("shadow_color"), 4, [r / 255, g / 255, b / 255, alpha]);
+    if (!this._pipeline) {
+      // Keep the pipeline only once it's set up, as drawing one without
+      // the multiply blend covers the section in white. A shadow that
+      // fails stays off rather than retrying on every frame.
+      if (this._failed) {
+        return;
+      }
+
+      try {
+        this._pipeline = shadowPipeline();
+      } catch (e) {
+        this._failed = true;
+        console.error("panel-color-matcher: no text shadow:", e);
+
+        return;
+      }
+    }
+
+    const pipeline = this._pipeline;
+    // The texture spans the actor, so a pixel is 1 / its size. The panel
+    // repaints with whatever moves beneath it, so set uniforms only when
+    // they change.
+    const [width, height] = this.actor.get_size();
+    // The texture has more pixels than the actor on a scaled monitor.
+    const lod = Math.max(0, Math.log2(this._radius / 12 * texture.get_width() / width));
+    const values = {
+      pixel_w: 1 / width,
+      pixel_h: 1 / height,
+      spread: this._radius / 6,
+      lod,
+      offset: this._distance,
+      opacity: this.actor.get_paint_opacity() / 255,
+      factor_r: this._factors[0],
+      factor_g: this._factors[1],
+      factor_b: this._factors[2],
+    };
+    this._uniforms ??= {};
+
+    for (const [name, value] of Object.entries(values)) {
+      if (this._uniforms[name] !== value) {
+        this._uniforms[name] = value;
+        pipeline.set_uniform_1f(pipeline.get_uniform_location(name), value);
+      }
+    }
+
+    pipeline.set_layer_texture(0, texture);
+    const shadowNode = Clutter.PipelineNode.new(pipeline);
+    node.add_child(shadowNode);
+    shadowNode.add_rectangle(Clutter.ActorBox.new(0, 0, texture.get_width(), texture.get_height()));
+  }
+
+  setShadow(factors, distance, radius) {
+    // factors is [r, g, b] in 0-1, or null for no shadow; distance is how
+    // far down the shadow is cast and radius how far out it fades, in px.
+    if (factors?.join() === this._factors?.join() && distance === this._distance && radius === this._radius) {
+      return;
+    }
+
+    this._factors = factors;
+    this._distance = distance;
+    this._radius = radius;
     this.queue_repaint();
   }
 
@@ -240,10 +359,12 @@ export default class PanelColorMatcher extends Extension {
       "changed::brightness-compensation", () => this._syncBackground(),
       "changed::text-contrast", () => this._syncBackground(),
       "changed::invert-text", () => this._syncBackground(),
-      "changed::text-shadow", () => {
-        this._syncTextShadow();
-        this._syncBackground();
-      },
+      "changed::text-shadow", () => this._syncBackground(),
+      "changed::maximized-shadow", () => this._syncBackground(),
+      "changed::shadow-distance", () => this._syncBackground(),
+      "changed::shadow-radius", () => this._syncBackground(),
+      "changed::shadow-opacity", () => this._syncBackground(),
+      "changed::shadow-vibrance", () => this._syncBackground(),
       "changed::wallpaper-accent", () => this._updateAccent(),
       this);
 
@@ -252,6 +373,7 @@ export default class PanelColorMatcher extends Extension {
     this._samples = null;
     this._samplesKey = null;
     this._style = null;
+    this._panelRedirect = null;
     this._maximized = false;
     this._updateTimeout = null;
     this._quickTimeout = null;
@@ -260,7 +382,6 @@ export default class PanelColorMatcher extends Extension {
     this._lastSample = -Infinity;
     this._accentRequest = 0;
     this._accentWatch = 0;
-    this._syncTextShadow();
     this._update();
     this._updateAccent();
   }
@@ -522,10 +643,21 @@ export default class PanelColorMatcher extends Extension {
     }
   }
 
-  _syncTextShadow() {
+  _shadowEnabled() {
+    // Whether the text shadow is on, which a maximized or fullscreen window
+    // under the panel may turn off.
+    if (!this._settings.get_boolean("text-shadow")) {
+      return false;
+    }
+
+    return !this._maximized || this._settings.get_boolean("maximized-shadow");
+  }
+
+  _syncTextShadow(enabled) {
     // stylesheet.css drops the per-label and per-icon shadows, since the
-    // shadow effect on the panel's sections takes their place.
-    if (this._settings.get_boolean("text-shadow")) {
+    // shadow effect on the panel's sections takes their place. Without
+    // ours, the theme's own come back, as with the shadow switched off.
+    if (enabled) {
       Main.panel.add_style_class_name(TEXT_SHADOW_CLASS);
     } else {
       Main.panel.remove_style_class_name(TEXT_SHADOW_CLASS);
@@ -536,15 +668,31 @@ export default class PanelColorMatcher extends Extension {
     return [Main.panel._leftBox, Main.panel._centerBox, Main.panel._rightBox];
   }
 
-  _syncShadowEffect(colors) {
+  _syncShadowEffect(shadows) {
     // Shadow everything each section draws, whatever kind of actor, from
-    // its tinted [r, g, b, alpha] color, one per section in the order of
-    // _sectionBoxes(), or remove the shadows on null. The panel background
-    // sits on the panel itself, so it casts none.
+    // its [r, g, b] factors, one per section in the order of
+    // _sectionBoxes(), a null one for none, or remove the shadows on null.
+    // The panel background sits on the panel itself, so it casts none.
+    //
+    // The shell always draws the panel offscreen first (panel.js), where
+    // the shadow's multiply would see only the panel's own, mostly
+    // transparent background, not the wallpaper. So while shadows are on,
+    // draw the panel straight onto the stage, offscreen only for opacity,
+    // and give the shell its own setting back after.
+    if (shadows === null || shadows.every(s => s === null)) {
+      if (this._panelRedirect !== null) {
+        Main.panel.set_offscreen_redirect(this._panelRedirect);
+        this._panelRedirect = null;
+      }
+    } else if (this._panelRedirect === null) {
+      this._panelRedirect = Main.panel.get_offscreen_redirect();
+      Main.panel.set_offscreen_redirect(Clutter.OffscreenRedirect.AUTOMATIC_FOR_OPACITY);
+    }
+
     for (const [i, box] of this._sectionBoxes().entries()) {
       let effect = box.get_effect(SHADOW_EFFECT_NAME);
 
-      if (colors === null) {
+      if (shadows === null) {
         if (effect) {
           box.remove_effect(effect);
         }
@@ -557,22 +705,29 @@ export default class PanelColorMatcher extends Extension {
         box.add_effect_with_name(SHADOW_EFFECT_NAME, effect);
       }
 
-      effect.setColor(colors[i]);
+      effect.setShadow(
+        shadows[i], this._settings.get_int("shadow-distance"), this._settings.get_int("shadow-radius"));
     }
   }
 
   _sectionShadows(panel, opacity, compensate, strength, gradient) {
     // Behind a gradient each section shows its own part of the backdrop,
     // e.g. the clock a blue sky while the left a dark rock decides the
-    // panel color, so shade each from the samples beneath it, as the same
-    // vivid deepening the panel color is. The text color is one for the
-    // whole panel, so keep white text's colors even where the backdrop
-    // alone would get dark text. Dark text and a solid panel, which shows
-    // its one color everywhere, keep the panel's own.
+    // panel color, so judge each one's contrast and tone from the samples
+    // beneath it. The text color is one for the whole panel, so keep white text's
+    // shadows even where the backdrop alone would get dark text. A solid
+    // panel shows its one color everywhere, so it's that behind every
+    // section. A dark shadow would cost dark text contrast, so it gets none.
     const boxes = this._sectionBoxes();
+    const shadowOpacity = this._settings.get_int("shadow-opacity") / 100;
+    const vibrance = this._settings.get_int("shadow-vibrance") / 100;
 
-    if (!gradient || panel.darkText || !this._samples) {
-      return boxes.map(() => shadowColor(panel.rgb, panel.contrast));
+    if (panel.darkText) {
+      return boxes.map(() => null);
+    }
+
+    if (!gradient || !this._samples) {
+      return boxes.map(() => shadowFactors(panel.rgb, panel.contrast, shadowOpacity, vibrance));
     }
 
     const monitor = global.display.get_monitor_geometry(global.display.get_primary_monitor());
@@ -584,7 +739,7 @@ export default class PanelColorMatcher extends Extension {
         prevalentColor(samplesUnder(this._samples, x0, x0 + box.width, monitor.width)),
         opacity, compensate, strength, false, gradient);
 
-      return shadowColor(local.rgb, local.contrast);
+      return shadowFactors(local.rgb, local.contrast, shadowOpacity, vibrance);
     });
   }
 
@@ -667,7 +822,10 @@ export default class PanelColorMatcher extends Extension {
     }
 
     // Each section of the panel casts one shadow from all it draws.
-    if (this._settings.get_boolean("text-shadow")) {
+    const shadowEnabled = this._shadowEnabled();
+    this._syncTextShadow(shadowEnabled);
+
+    if (shadowEnabled) {
       this._syncShadowEffect(this._sectionShadows(panel, meanOpacity, compensate, strength, gradient));
     } else {
       this._syncShadowEffect(null);
