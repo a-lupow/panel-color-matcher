@@ -85,12 +85,13 @@ export const VIVID_DARK = 0.6;
 // One flat panel color can't match a backdrop of several, e.g. a dark rock
 // beside a blue sky, so the deepening is done on each blur pixel from its
 // own color, see deepenPixel(). Dark text needs the backdrop bright.
-export function blendStrength(compensate, darkText) {
+// intensity (0-1 and up, default 1) scales the whole deepening.
+export function blendStrength(compensate, darkText, intensity = 1) {
   if (darkText) {
     return 0;
   }
 
-  return R.blend + R.compBlend * compensate;
+  return intensity * (R.blend + R.compBlend * compensate);
 }
 
 // Return those of the samples, taken evenly across width, that lie under
@@ -112,6 +113,64 @@ export function samplesUnder(samples, x0, x1, width) {
   const middle = Math.floor((x0 + x1) / 2 / step);
 
   return [samples[Math.min(samples.length - 1, Math.max(0, middle))]];
+}
+
+// Return the [x, y] pixel of an imageWidth x imageHeight wallpaper that
+// the shell shows at x, y of a monitorWidth x monitorHeight monitor with
+// picture-options option, or null where it shows none of it there.
+// Spanned is taken as zoomed on the one monitor.
+export function wallpaperPoint(option, imageWidth, imageHeight, monitorWidth, monitorHeight, x, y) {
+  let scaleX = 1;
+  let scaleY = 1;
+
+  if (option === "zoom" || option === "spanned") {
+    scaleX = Math.max(monitorWidth / imageWidth, monitorHeight / imageHeight);
+    scaleY = scaleX;
+  } else if (option === "scaled") {
+    scaleX = Math.min(monitorWidth / imageWidth, monitorHeight / imageHeight);
+    scaleY = scaleX;
+  } else if (option === "stretched") {
+    scaleX = monitorWidth / imageWidth;
+    scaleY = monitorHeight / imageHeight;
+  } else if (option === "wallpaper") {
+    return [x % imageWidth, y % imageHeight];
+  } else if (option !== "centered") {
+    return null;
+  }
+
+  // Every other option centers the scaled image on the monitor.
+  const ix = (x - (monitorWidth - imageWidth * scaleX) / 2) / scaleX;
+  const iy = (y - (monitorHeight - imageHeight * scaleY) / 2) / scaleY;
+
+  if (ix < 0 || iy < 0 || ix >= imageWidth || iy >= imageHeight) {
+    return null;
+  }
+
+  return [ix, iy];
+}
+
+// Return the wallpaper behind samples, where covered[i] tells whether a
+// window covers sample i, and cache holds the wallpaper last seen at each
+// sample, or null where it never was. An uncovered sample is the
+// wallpaper, so it updates cache in place. A covered one takes its cached
+// color, or failing that, the most common of the known ones. With none
+// known, return samples as they are.
+export function wallpaperSamples(samples, covered, cache) {
+  for (const [i, sample] of samples.entries()) {
+    if (!covered[i]) {
+      cache[i] = sample;
+    }
+  }
+
+  const known = cache.filter(c => c !== null);
+
+  if (known.length === 0) {
+    return samples;
+  }
+
+  const fill = prevalentColor(known);
+
+  return cache.map(c => c ?? fill);
 }
 
 // Return the blur pixel rgb (0-1 channels) deepened at strength (0-1),
@@ -143,10 +202,11 @@ function deepenFactors(rgb, amount) {
 }
 
 // Return rgb with its HSV saturation boosted for a color darkened by dark
-// (0-1). The strongest channel stays, the weaker ones move away from it,
-// so the hue holds and grays stay gray. This only ever lowers channels,
-// so it never raises the luma past a cap computed before.
-function vivid(rgb, dark) {
+// (0-1), scaled by saturation (0-1 and up, 1 the default boost, 0 none).
+// The strongest channel stays, the weaker ones move away from it, so the
+// hue holds and grays stay gray. This only ever lowers channels, so it
+// never raises the luma past a cap computed before.
+function vivid(rgb, dark, saturation = 1) {
   const max = Math.max(...rgb);
   const min = Math.min(...rgb);
 
@@ -155,24 +215,26 @@ function vivid(rgb, dark) {
   }
 
   // Stop at full saturation, where the weakest channel reaches 0.
-  const boost = Math.min(1 + (R.vivid + VIVID_DARK * dark) * saturationRoom(rgb, 255), max / (max - min));
+  const boost = Math.min(
+    1 + saturation * (R.vivid + VIVID_DARK * dark) * saturationRoom(rgb, 255), max / (max - min));
 
   return rgb.map(c => max - (max - c) * boost);
 }
 
 // Return the backdrop color bg darkened to k of its brightness and made
-// the more vivid the darker it gets.
-function deepen(bg, k) {
-  return vivid(bg.map(c => c * k), 1 - k).map(Math.floor);
+// the more vivid the darker it gets, the boost scaled by saturation.
+function deepen(bg, k, saturation = 1) {
+  return vivid(bg.map(c => c * k), 1 - k, saturation).map(Math.floor);
 }
 
 // Return the panel { rgb: [r, g, b], darkText } for the sampled backdrop
 // color bg, opacity (0-1), brightness compensation strength (0-1),
 // text-contrast strength (0-1), whether to switch to dark text instead of
-// darkening the color and whether the panel is a gradient. The panel is
+// darkening the color, whether the panel is a gradient and the vivid
+// saturation boost's strength (0-1 and up, default 1). The panel is
 // always a vivid, darker shade of the backdrop, between BASE_DARKEN and
 // MIN_DARKEN of its brightness, never black.
-export function panelColor(bg, opacity, compensate, strength, invert, gradient) {
+export function panelColor(bg, opacity, compensate, strength, invert, gradient, saturation = 1) {
   const backdropLuma = luma(...bg);
   let k = BASE_DARKEN;
 
@@ -190,7 +252,7 @@ export function panelColor(bg, opacity, compensate, strength, invert, gradient) 
   k = Math.max(MIN_DARKEN, k);
   // A gradient fades into the backdrop around the text, so there judge
   // the backdrop itself, not its blend with a compensated, darker color.
-  let textLuma = opacity * luma(...deepen(bg, k)) + (1 - opacity) * backdropLuma;
+  let textLuma = opacity * luma(...deepen(bg, k, saturation)) + (1 - opacity) * backdropLuma;
 
   if (gradient) {
     textLuma = backdropLuma;
@@ -202,7 +264,7 @@ export function panelColor(bg, opacity, compensate, strength, invert, gradient) 
   // Compensation only helps white text, so dark text gets the backdrop
   // darkened by the base amount alone.
   if (invert && strength > 0 && contrast(0, textLuma) > contrast(255, textLuma) / strength) {
-    return { rgb: deepen(bg, BASE_DARKEN), darkText: true, contrast: contrast(0, textLuma) };
+    return { rgb: deepen(bg, BASE_DARKEN, saturation), darkText: true, contrast: contrast(0, textLuma) };
   }
 
   // The panel text is white, so darken the color until the result keeps
@@ -218,7 +280,7 @@ export function panelColor(bg, opacity, compensate, strength, invert, gradient) 
     k = Math.max(MIN_DARKEN, Math.min(k, cap));
   }
 
-  const rgb = deepen(bg, k);
+  const rgb = deepen(bg, k, saturation);
   textLuma = opacity * luma(...rgb) + (1 - opacity) * backdropLuma;
 
   if (gradient) {

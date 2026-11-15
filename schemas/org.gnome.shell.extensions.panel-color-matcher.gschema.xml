@@ -25,6 +25,18 @@
       <summary>Gradient bottom opacity</summary>
       <description>Opacity of the panel background at its bottom edge, in percent, while the gradient is on.</description>
     </key>
+    <key name="gradient-intensity" type="i">
+      <range min="0" max="200"/>
+      <default>100</default>
+      <summary>Gradient intensity</summary>
+      <description>How strongly the Blur my Shell panel blur is deepened toward the top edge while the gradient is on, in percent of the default. 0 leaves the blur in its own colors, as its own pipeline draws them; above 100 deepens it further. The brightness compensation adds to it in the same proportion.</description>
+    </key>
+    <key name="gradient-softness" type="i">
+      <range min="0" max="100"/>
+      <default>100</default>
+      <summary>Gradient softness</summary>
+      <description>How softly the Blur my Shell panel blur fades out toward the bottom edge while the gradient is on, in percent. 0 fades it linearly, which stops changing abruptly at the bottom edge and shows there as a line; 100 eases the fade out so it levels off into the backdrop.</description>
+    </key>
     <key name="brightness-compensation" type="i">
       <range min="0" max="100"/>
       <default>0</default>
@@ -36,6 +48,12 @@
       <default>100</default>
       <summary>Text contrast strength</summary>
       <description>How strongly bright colors are darkened to keep the white panel text readable, in percent. 0 disables it; 100 aims for 4.5:1 contrast. The panel always stays a vivid shade of the backdrop, never darker than a third of it, so a very bright backdrop behind a translucent panel leaves the rest to the text shadow.</description>
+    </key>
+    <key name="saturation-boost" type="i">
+      <range min="0" max="200"/>
+      <default>100</default>
+      <summary>Saturation boost</summary>
+      <description>How much more saturated the panel color gets than the sampled backdrop, the darker the panel the more, in percent of the default boost. 0 keeps the backdrop's own hue; 100 is the default; above it pushes further toward a vivid, saturated shade.</description>
     </key>
     <key name="invert-text" type="b">
       <default>false</default>

@@ -42,10 +42,21 @@ export default class PanelColorMatcherPreferences extends ExtensionPreferences {
         const gradientOpacityRow = addPercentRow("gradient-opacity", "Gradient Bottom Opacity",
                                                  "Panel background opacity in percent at the bottom edge");
         settings.bind("gradient", gradientOpacityRow, "sensitive", Gio.SettingsBindFlags.GET);
+        const gradientIntensityRow = addSpinRow("gradient-intensity", "Gradient Intensity",
+                                                "How strongly the blurred backdrop is deepened toward the top edge, " +
+                                                "in percent of the default; 0 leaves its own colors", 200);
+        settings.bind("gradient", gradientIntensityRow, "sensitive", Gio.SettingsBindFlags.GET);
+        const gradientSoftnessRow = addPercentRow("gradient-softness", "Gradient Softness",
+                                                  "How gently the blurred backdrop levels off into the backdrop " +
+                                                  "at the bottom edge, in percent; 0 fades linearly");
+        settings.bind("gradient", gradientSoftnessRow, "sensitive", Gio.SettingsBindFlags.GET);
         addPercentRow("brightness-compensation", "Brightness Compensation",
                       "How strongly bright panel colors are darkened and saturated for the white text, in percent");
         addPercentRow("text-contrast", "Text Contrast",
                       "How bright the panel may get before it's darkened, or the text turns dark, in percent");
+        addSpinRow("saturation-boost", "Saturation Boost",
+                   "How much more saturated the panel color gets than the sampled backdrop, the darker " +
+                   "the panel the more, in percent of the default boost; 0 keeps the backdrop's own hue", 200);
         const invertRow = new Adw.SwitchRow({
             title: "Dark Text on Bright Colors",
             subtitle: "Turn the text and symbolic icons black instead of darkening colors " +

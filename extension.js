@@ -6,18 +6,21 @@ import GdkPixbuf from "gi://GdkPixbuf";
 import Gio from "gi://Gio";
 import GLib from "gi://GLib";
 import GObject from "gi://GObject";
+import Meta from "gi://Meta";
 import Shell from "gi://Shell";
 
 import * as Main from "resource:///org/gnome/shell/ui/main.js";
 import { Extension } from "resource:///org/gnome/shell/extensions/extension.js";
 
 import {
-  R, accentFromPixels, blendStrength, darkTextColor, panelColor, prevalentColor, samplesUnder, shadowFactors,
+  R, accentFromPixels, blendStrength, darkTextColor, panelColor,  prevalentColor, samplesUnder, shadowFactors,
+  wallpaperPoint, wallpaperSamples,
 } from "./color.js";
 
 Gio._promisify(Gio.File.prototype, "load_contents_async");
 Gio._promisify(Gio.File.prototype, "read_async");
 Gio._promisify(GdkPixbuf.Pixbuf, "new_from_stream_at_scale_async", "new_from_stream_finish");
+Gio._promisify(GdkPixbuf.Pixbuf, "get_file_info_async", "get_file_info_finish");
 Gio._promisify(Shell.Screenshot.prototype, "screenshot_area");
 
 // Changing the accent restyles the shell and every app, which stutters
@@ -30,6 +33,9 @@ const SAMPLE_COUNT = 16;
 // Each sample repaints the stage once, so take at most one per this many
 // ms; requests in between are coalesced into one at the end of it.
 const SAMPLE_INTERVAL = 300;
+
+// The wallpaper file is decoded down to this width for its samples.
+const WALLPAPER_WIDTH = 512;
 
 // Blur my Shell's panel blur actors, see components/panel/panel_background.js.
 const BLUR_GROUP_NAME = "bms-panel-backgroundgroup";
@@ -47,6 +53,11 @@ const SHADOW_EFFECT_NAME = "panel-color-matcher-shadow";
 // It also deepens each pixel from its own color, at strength at the top
 // edge fading to none at the bottom, as deepenPixel() in color.js does, so
 // every part of the backdrop deepens in its own hue.
+//
+// A linear fade stops changing abruptly at the bottom edge, which the eye
+// sees as a line even where the brightness matches. softness (0-1) eases
+// both fades out toward 1 - (1 - t)^2, whose change flattens to none at
+// the bottom edge.
 const GradientMaskEffect = GObject.registerClass({
   GTypeName: "PanelColorMatcherGradientMaskEffect",
 }, class GradientMaskEffect extends Shell.GLSLEffect {
@@ -55,8 +66,10 @@ const GradientMaskEffect = GObject.registerClass({
     this.add_glsl_snippet(
       Cogl.SnippetHook.FRAGMENT,
       "uniform float top_alpha;\nuniform float bottom_alpha;\nuniform float strength;\n" +
-      "uniform float dark_weight;\nuniform float mul;\nuniform float weight_min;\nuniform float weight_max;",
-      `float t = cogl_tex_coord_in[0].t;
+      "uniform float dark_weight;\nuniform float mul;\nuniform float weight_min;\nuniform float weight_max;\n" +
+      "uniform float softness;",
+      `float y = cogl_tex_coord_in[0].t;
+      float t = mix(y, 1.0 - (1.0 - y) * (1.0 - y), softness);
       float a = max(cogl_color_out.a, 0.0001);
       vec3 c = cogl_color_out.rgb / a;
       float l = dot(c, vec3(0.299, 0.587, 0.114));
@@ -76,14 +89,17 @@ const GradientMaskEffect = GObject.registerClass({
     super.vfunc_paint(node, paintContext, flags | Clutter.EffectPaintFlags.ACTOR_DIRTY);
   }
 
-  setAlphas(top, bottom, strength) {
-    if (top === this._top && bottom === this._bottom && strength === this._strength) {
+  setAlphas(top, bottom, strength, softness) {
+    if (top === this._top && bottom === this._bottom && strength === this._strength &&
+        softness === this._softness) {
       return;
     }
 
     this._top = top;
     this._bottom = bottom;
     this._strength = strength;
+    this._softness = softness;
+    this.set_uniform_float(this.get_uniform_location("softness"), 1, [softness]);
     this.set_uniform_float(this.get_uniform_location("top_alpha"), 1, [top]);
     this.set_uniform_float(this.get_uniform_location("bottom_alpha"), 1, [bottom]);
     this.set_uniform_float(this.get_uniform_location("strength"), 1, [strength]);
@@ -293,7 +309,11 @@ export default class PanelColorMatcher extends Extension {
     // A new monitor layout moves the panel, or gives a monitorless session
     // its first monitor to sample.
     Main.layoutManager.connectObject(
-      "monitors-changed", () => this._updateDelayed(),
+      "monitors-changed", () => {
+        this._wallpaperCache = null;
+        this._loadWallpaper();
+        this._updateDelayed();
+      },
       this);
 
     // An inline style overrides the theme's transparent #panel:overview,
@@ -335,6 +355,8 @@ export default class PanelColorMatcher extends Extension {
     this._backgroundSettings = new Gio.Settings({ schema_id: "org.gnome.desktop.background" });
     this._backgroundSettings.connectObject(
       "changed", () => {
+        this._wallpaperCache = null;
+        this._loadWallpaper();
         this._updateDelayed(1500);
         this._updateAccent();
       },
@@ -345,6 +367,8 @@ export default class PanelColorMatcher extends Extension {
     this._interfaceSettings = new Gio.Settings({ schema_id: "org.gnome.desktop.interface" });
     this._interfaceSettings.connectObject(
       "changed::color-scheme", () => {
+        this._wallpaperCache = null;
+        this._loadWallpaper();
         this._updateDelayed(1500);
         this._updateAccent();
       },
@@ -358,6 +382,9 @@ export default class PanelColorMatcher extends Extension {
       "changed::gradient-opacity", () => this._syncBackground(),
       "changed::brightness-compensation", () => this._syncBackground(),
       "changed::text-contrast", () => this._syncBackground(),
+      "changed::saturation-boost", () => this._syncBackground(),
+      "changed::gradient-intensity", () => this._syncBackground(),
+      "changed::gradient-softness", () => this._syncBackground(),
       "changed::invert-text", () => this._syncBackground(),
       "changed::text-shadow", () => this._syncBackground(),
       "changed::maximized-shadow", () => this._syncBackground(),
@@ -372,6 +399,9 @@ export default class PanelColorMatcher extends Extension {
     this._bg = null;
     this._samples = null;
     this._samplesKey = null;
+    this._wallpaperCache = null;
+    this._wallpaperRequest = 0;
+    this._windowOverStrip = false;
     this._style = null;
     this._panelRedirect = null;
     this._maximized = false;
@@ -384,6 +414,7 @@ export default class PanelColorMatcher extends Extension {
     this._accentWatch = 0;
     this._update();
     this._updateAccent();
+    this._loadWallpaper();
   }
 
   disable() {
@@ -432,6 +463,7 @@ export default class PanelColorMatcher extends Extension {
     this._bg = null;
     this._samples = null;
     this._samplesKey = null;
+    this._wallpaperCache = null;
     this._style = null;
   }
 
@@ -479,6 +511,98 @@ export default class PanelColorMatcher extends Extension {
     this._accentWatch = monitor.add_idle_watch(ACCENT_IDLE_TIME, apply);
   }
 
+  _wallpaperUri() {
+    let key = "picture-uri";
+
+    if (this._interfaceSettings.get_string("color-scheme") === "prefer-dark") {
+      key = "picture-uri-dark";
+    }
+
+    return this._backgroundSettings.get_string(key);
+  }
+
+  async _wallpaperFile(uri) {
+    const file = Gio.File.new_for_uri(uri);
+
+    if (!uri.endsWith(".xml")) {
+      return file;
+    }
+
+    // shortcut: a slideshow XML uses its first image, even when the
+    // shell shows a later one; track the slideshow clock if hues differ.
+    const [contents] = await file.load_contents_async(null);
+    const path = new TextDecoder().decode(contents).match(/<file>\s*([^<]+?)\s*<\/file>/)[1];
+
+    return Gio.File.new_for_path(path);
+  }
+
+  async _loadWallpaper() {
+    // Read the wallpaper under the sample strip from its file, for the
+    // samples a window covers, see _coveredSamples(). A window may cover
+    // them since login, so the screen may never have shown it.
+    const request = ++this._wallpaperRequest;
+    const uri = this._wallpaperUri();
+    const option = this._backgroundSettings.get_string("picture-options");
+    let samples = null;
+
+    try {
+      const file = await this._wallpaperFile(uri);
+      const [, imageWidth, imageHeight] = await GdkPixbuf.Pixbuf.get_file_info_async(file.get_path(), null);
+      // Decode in a worker thread, scaled down while decoding, so even
+      // a large wallpaper never blocks the shell.
+      const stream = await file.read_async(GLib.PRIORITY_DEFAULT, null);
+      const pixbuf = await GdkPixbuf.Pixbuf.new_from_stream_at_scale_async(stream, WALLPAPER_WIDTH, -1, true, null);
+      stream.close(null);
+
+      if (!this._enabled || request !== this._wallpaperRequest || global.display.get_n_monitors() === 0) {
+        return;
+      }
+
+      const pixels = pixbuf.read_pixel_bytes().toArray();
+      const monitor = global.display.get_monitor_geometry(global.display.get_primary_monitor());
+      const y = Main.panel.height + 3;
+      const scale = pixbuf.width / imageWidth;
+
+      samples = Array.from({ length: SAMPLE_COUNT }, (_, i) => {
+        const point = wallpaperPoint(
+          option, imageWidth, imageHeight, monitor.width, monitor.height, monitor.width * (i + 0.5) / SAMPLE_COUNT, y);
+
+        if (point === null) {
+          return null;
+        }
+
+        const px = Math.min(pixbuf.width - 1, Math.floor(point[0] * scale));
+        const py = Math.min(pixbuf.height - 1, Math.floor(point[1] * scale));
+        const p = py * pixbuf.rowstride + px * pixbuf.n_channels;
+
+        return [pixels[p], pixels[p + 1], pixels[p + 2]];
+      });
+    } catch (e) {
+      // Colors and gradients without a picture leave the screen's samples.
+      if (this._enabled && request === this._wallpaperRequest) {
+        this._debug(`no wallpaper samples from ${uri}: ${e.message}`);
+      }
+    }
+
+    if (!this._enabled || request !== this._wallpaperRequest) {
+      return;
+    }
+
+    this._debug(`wallpaper samples ${JSON.stringify(samples)} from ${uri}`);
+    this._wallpaperCache = samples;
+
+    // Resample only where the file changes anything. A pending sample,
+    // e.g. the one after a wallpaper crossfade, reads the cache itself,
+    // and an earlier one changes only where a window covered the strip.
+    // Sampling again otherwise would restyle the panel twice per change,
+    // or mid-crossfade, which shows as lag.
+    if (this._updateTimeout || !this._windowOverStrip) {
+      return;
+    }
+
+    this._updateDelayed();
+  }
+
   async _updateAccent() {
     // A newer wallpaper or a turned-off switch replaces any pending accent.
     this._removeAccentWatch();
@@ -491,26 +615,11 @@ export default class PanelColorMatcher extends Extension {
 
     // Only the latest request may write, if wallpapers change quickly.
     const request = ++this._accentRequest;
-    let key = "picture-uri";
-
-    if (this._interfaceSettings.get_string("color-scheme") === "prefer-dark") {
-      key = "picture-uri-dark";
-    }
-
-    const uri = this._backgroundSettings.get_string(key);
+    const uri = this._wallpaperUri();
     let accent;
 
     try {
-      let file = Gio.File.new_for_uri(uri);
-
-      // shortcut: a slideshow XML uses its first image, even when the
-      // shell shows a later one; track the slideshow clock if hues differ.
-      if (uri.endsWith(".xml")) {
-        const [contents] = await file.load_contents_async(null);
-        const path = new TextDecoder().decode(contents).match(/<file>\s*([^<]+?)\s*<\/file>/)[1];
-        file = Gio.File.new_for_path(path);
-      }
-
+      const file = await this._wallpaperFile(uri);
       // Decode in a worker thread, scaled down while decoding, so even
       // a large wallpaper never blocks the shell.
       const stream = await file.read_async(GLib.PRIORITY_DEFAULT, null);
@@ -591,11 +700,11 @@ export default class PanelColorMatcher extends Extension {
     return group?.get_children().find(c => c.name === BLUR_WIDGET_NAME) ?? null;
   }
 
-  _syncBlurMask(bottomOpacity, strength = 0) {
+  _syncBlurMask(bottomOpacity, strength = 0, softness = 0) {
     // The blur is its own actor behind the panel, so the panel's gradient
     // can't make it transparent. Fade it with the same vertical gradient,
     // from full blur at the top to bottomOpacity, deepened at strength at
-    // the top, or drop the mask on null.
+    // the top and eased out by softness, or drop the mask on null.
     const actor = this._blurActor();
 
     if (!actor) {
@@ -619,7 +728,40 @@ export default class PanelColorMatcher extends Extension {
       actor.add_effect_with_name(BLUR_MASK_NAME, effect);
     }
 
-    effect.setAlphas(1, bottomOpacity, strength);
+    effect.setAlphas(1, bottomOpacity, strength, softness);
+  }
+
+  _coveredSamples(monitor, y) {
+    // Whether anything but the wallpaper shows at each sample, at the
+    // pixels _sampleStrip() reads. The capture can't leave it out: hiding
+    // the windows repicks the pointer, which closes the tooltips under it,
+    // and the wallpaper only paints what the last frame left unobscured.
+    // So covered samples are replaced by the wallpaper seen there before,
+    // see wallpaperSamples() in color.js.
+    //
+    // A pick finds whatever is on top, a window or any shell or extension
+    // actor, e.g. Tiling Shell's snap assistant in uiGroup, a notification
+    // banner or a menu. It's geometric, no repaint. It only hits a
+    // window's surface, though, so the window's actor, which includes its
+    // client-side shadow, counts too.
+    const boxes = global.get_window_actors()
+      .filter(actor => actor.visible)
+      .map(actor => actor.get_transformed_extents());
+
+    return Array.from({ length: SAMPLE_COUNT }, (_, i) => {
+      const x = monitor.x + monitor.width * (i + 0.5) / SAMPLE_COUNT;
+      const shadowed = boxes.some(box =>
+        x >= box.get_x() && x < box.get_x() + box.get_width() &&
+        y >= box.get_y() && y < box.get_y() + box.get_height());
+
+      if (shadowed) {
+        return true;
+      }
+
+      const actor = global.stage.get_actor_at_pos(Clutter.PickMode.ALL, x, y);
+
+      return !(actor instanceof Meta.BackgroundActor || actor instanceof Meta.BackgroundGroup);
+    });
   }
 
   _hasMaximizedWindow() {
@@ -710,7 +852,7 @@ export default class PanelColorMatcher extends Extension {
     }
   }
 
-  _sectionShadows(panel, opacity, compensate, strength, gradient) {
+  _sectionShadows(panel, opacity, compensate, strength, gradient, saturation) {
     // Behind a gradient each section shows its own part of the backdrop,
     // e.g. the clock a blue sky while the left a dark rock decides the
     // panel color, so judge each one's contrast and tone from the samples
@@ -737,7 +879,7 @@ export default class PanelColorMatcher extends Extension {
       const x0 = x - monitor.x;
       const local = panelColor(
         prevalentColor(samplesUnder(this._samples, x0, x0 + box.width, monitor.width)),
-        opacity, compensate, strength, false, gradient);
+        opacity, compensate, strength, false, gradient, saturation);
 
       return shadowFactors(local.rgb, local.contrast, shadowOpacity, vibrance);
     });
@@ -791,8 +933,9 @@ export default class PanelColorMatcher extends Extension {
     const meanOpacity = (opacity + bottomOpacity) / 2;
     const compensate = this._settings.get_int("brightness-compensation") / 100;
     const strength = this._settings.get_int("text-contrast") / 100;
+    const saturation = this._settings.get_int("saturation-boost") / 100;
     const panel = panelColor(
-      bg, meanOpacity, compensate, strength, this._settings.get_boolean("invert-text"), gradient);
+      bg, meanOpacity, compensate, strength, this._settings.get_boolean("invert-text"), gradient, saturation);
     const { rgb: [r, g, b], darkText } = panel;
     this._syncDarkText(darkText);
 
@@ -814,7 +957,9 @@ export default class PanelColorMatcher extends Extension {
       const bottom = `rgba(${r}, ${g}, ${b}, ${bottomOpacity * tint})`;
       this._style = "background-gradient-direction: vertical; " +
         `background-gradient-start: ${top}; background-gradient-end: ${bottom};`;
-      this._syncBlurMask(bottomOpacity, blendStrength(compensate, darkText));
+      const intensity = this._settings.get_int("gradient-intensity") / 100;
+      const softness = this._settings.get_int("gradient-softness") / 100;
+      this._syncBlurMask(bottomOpacity, blendStrength(compensate, darkText, intensity), softness);
     } else {
       const top = `rgba(${r}, ${g}, ${b}, ${opacity})`;
       this._style = `background-color: ${top};`;
@@ -826,7 +971,7 @@ export default class PanelColorMatcher extends Extension {
     this._syncTextShadow(shadowEnabled);
 
     if (shadowEnabled) {
-      this._syncShadowEffect(this._sectionShadows(panel, meanOpacity, compensate, strength, gradient));
+      this._syncShadowEffect(this._sectionShadows(panel, meanOpacity, compensate, strength, gradient, saturation));
     } else {
       this._syncShadowEffect(null);
     }
@@ -885,6 +1030,14 @@ export default class PanelColorMatcher extends Extension {
     // of the samples.
     const y = monitor.y + Main.panel.height + 3;
 
+    // Behind a gradient only a maximized or fullscreen window may change
+    // the color; any other window moved near the panel is ignored.
+    const maximized = this._hasMaximizedWindow();
+    const wallpaperOnly = this._settings.get_boolean("gradient") && !maximized;
+    // Note now which samples a window covers, as windows may move before
+    // the capture is decoded.
+    const covered = this._coveredSamples(monitor, y);
+
     this._sampleStrip(monitor.x, y, monitor.width).then(colors => {
       this._sampling = false;
 
@@ -899,9 +1052,16 @@ export default class PanelColorMatcher extends Extension {
         return;
       }
 
-      const samples = colors.map(c => [c.r, c.g, c.b]);
+      let samples = colors.map(c => [c.r, c.g, c.b]);
+
+      this._windowOverStrip = wallpaperOnly && covered.some(c => c);
+
+      if (wallpaperOnly) {
+        this._wallpaperCache ??= samples.map(() => null);
+        samples = wallpaperSamples(samples, covered, this._wallpaperCache);
+      }
+
       const bg = prevalentColor(samples).join(", ");
-      const maximized = this._hasMaximizedWindow();
       // Maximize state flips before the window animation ends, so a quick
       // sample would change opacity ahead of the color. Leave that to the
       // settled sample so both crossfade in one transition.

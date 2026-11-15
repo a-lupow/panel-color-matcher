@@ -3,7 +3,7 @@
 
 import {
   MIN_MAX_LUMA, R, accentFromPixels, blendStrength, contrast, darkTextColor, deepenPixel, luma, panelColor,
-  prevalentColor, samplesUnder, shadowFactors,
+  prevalentColor, samplesUnder, shadowFactors, wallpaperPoint, wallpaperSamples,
 } from "./color.js";
 
 const assert = (ok, message) => {
@@ -125,6 +125,8 @@ assert(shadowFactors([128, 128, 128], 3, 0.5, 1).join() === shadowFactors([128, 
 assert(blendStrength(0, false) > 0, "the blur must always deepen a bit");
 assert(blendStrength(1, false) > blendStrength(0, false), "compensation must deepen the blur more");
 assert(blendStrength(1, true) === 0, "dark text must not deepen the blur");
+assert(blendStrength(0.5, false, 0.5) === blendStrength(0.5, false) / 2, "intensity must scale the blur deepening");
+assert(blendStrength(0.5, false, 0) === 0, "zero intensity must not deepen the blur");
 const px = c => c.map(v => v / 255);
 const lumaOf = c => luma(...c);
 const sky1 = px([90, 136, 173]);
@@ -210,5 +212,38 @@ const burnt = deepenPixel([226, 106, 115].map(c => c / 255), blendStrength(0.25,
 assert(burnt.every(c => c <= 226), "no channel must brighten");
 assert(burnt[0] / 226 < 0.75 && burnt[1] / 106 > 0.4,
        "a vivid pixel must darken evenly, not burn");
+
+// A window over part of the strip must not count; the wallpaper last
+// seen there stands in for it, and a spot never seen takes the wallpaper
+// seen elsewhere.
+const wpSky = [100, 150, 200];
+const wpRock = [40, 30, 20];
+const wpDialog = [50, 50, 50];
+const first = wallpaperSamples(
+  [wpSky, wpSky, wpSky, wpDialog], [false, false, false, true], [null, null, null, null]);
+assert(JSON.stringify(first) === JSON.stringify([wpSky, wpSky, wpSky, wpSky]),
+       "a never-seen covered sample must take the prevalent wallpaper");
+const seen = [wpRock, null];
+const moved = wallpaperSamples([wpDialog, wpSky], [true, false], seen);
+assert(JSON.stringify(moved) === JSON.stringify([wpRock, wpSky]),
+       "a covered sample must keep the wallpaper last seen there");
+assert(seen[1] === wpSky, "an uncovered sample must update the cache");
+const covered = [wpDialog, wpDialog];
+assert(wallpaperSamples(covered, [true, true], [null, null]) === covered,
+       "with no wallpaper known, the samples must stay as they are");
+
+// The wallpaper maps onto the monitor as the shell draws it: a zoomed
+// 4:3 image on a 16:10 monitor loses its top and bottom, a scaled one
+// shows none at the monitor's sides.
+const near = (a, b) => a.every((v, i) => Math.abs(v - b[i]) < 1e-9);
+assert(near(wallpaperPoint("zoom", 400, 300, 1600, 1000, 0, 0), [0, 25]),
+       "a zoomed wallpaper must crop its top and bottom evenly");
+assert(near(wallpaperPoint("stretched", 400, 300, 1600, 1000, 800, 500), [200, 150]),
+       "a stretched wallpaper must map the monitor's middle to the image's");
+assert(wallpaperPoint("scaled", 400, 300, 1600, 1000, 10, 500) === null,
+       "a scaled wallpaper must show none at the monitor's sides");
+assert(near(wallpaperPoint("wallpaper", 400, 300, 1600, 1000, 450, 310), [50, 10]),
+       "a tiled wallpaper must repeat");
+assert(wallpaperPoint("none", 400, 300, 1600, 1000, 0, 0) === null, "no wallpaper must map nowhere");
 
 print("ok");
