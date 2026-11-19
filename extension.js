@@ -292,18 +292,28 @@ const ShadowEffect = GObject.registerClass({
 export default class PanelColorMatcher extends Extension {
 
   enable() {
-    // https://mutter.gnome.org/meta/class.Display.html#signals
+    // The focus-window signal fires on every click that focuses a window,
+    // even the one already focused (meta_display_set_input_focus), so
+    // follow the property, which changes only with the window.
+    //
+    // Moving a window emits nothing we follow, so a dropped window samples
+    // at the end of its grab. Window events sample only for windows that
+    // are over the sample strip or were at the last sample, since no other
+    // window can change it. That keeps resizing, snapping or dragging a
+    // window elsewhere, which emits size-changed every frame, from
+    // sampling at all.
     global.display.connectObject(
-      "focus-window", () => this._updateDelayed(),
+      "notify::focus-window", () => this._onFocusWindow(),
+      "grab-op-end", (display, window) => this._onWindowChanged(window),
       this);
 
     // https://github.com/GNOME/gnome-shell/blob/main/js/ui/windowManager.js
     global.window_manager.connectObject(
-      "destroy", () => this._updateDelayed(),
-      "minimize", () => this._updateDelayed(),
-      "size-changed", () => this._updateDelayed(),
+      "destroy", (wm, actor) => this._onWindowChanged(actor.meta_window),
+      "minimize", (wm, actor) => this._onWindowChanged(actor.meta_window),
+      "size-changed", (wm, actor) => this._onWindowChanged(actor.meta_window),
       "switch-workspace", () => this._updateDelayed(),
-      "unminimize", () => this._updateDelayed(),
+      "unminimize", (wm, actor) => this._onWindowChanged(actor.meta_window),
       this);
 
     // A new monitor layout moves the panel, or gives a monitorless session
@@ -412,6 +422,8 @@ export default class PanelColorMatcher extends Extension {
     this._lastSample = -Infinity;
     this._accentRequest = 0;
     this._accentWatch = 0;
+    this._stripWindows = new Set();
+    this._focusWindow = global.display.focus_window;
     this._update();
     this._updateAccent();
     this._loadWallpaper();
@@ -464,7 +476,66 @@ export default class PanelColorMatcher extends Extension {
     this._samples = null;
     this._samplesKey = null;
     this._wallpaperCache = null;
+    this._stripWindows = null;
+    this._focusWindow = null;
     this._style = null;
+  }
+
+  _overStrip(actor, monitor, y) {
+    // Whether a window crosses the sample strip, by its actor, including
+    // its client-side shadow as in _coveredSamples(), or by its frame. The
+    // shell animates maximizing and fullscreen by scaling the actor back
+    // to the old rect first (_sizeChangedWindow in windowManager.js), so
+    // until that ends only the frame shows where the window now is.
+    const extents = actor.get_transformed_extents();
+    const frame = actor.meta_window.get_frame_rect();
+    const crosses = (bx, by, bw, bh) =>
+      y >= by && y < by + bh && bx < monitor.x + monitor.width && bx + bw > monitor.x;
+
+    return crosses(extents.get_x(), extents.get_y(), extents.get_width(), extents.get_height()) ||
+      crosses(frame.x, frame.y, frame.width, frame.height);
+  }
+
+  _affectsStrip(window) {
+    // Whether a change to window may change the samples: it was over the
+    // strip at the last sample, or is over it now on the active workspace.
+    if (!window) {
+      return false;
+    }
+
+    if (this._stripWindows.has(window)) {
+      return true;
+    }
+
+    const actor = window.get_compositor_private();
+
+    if (!actor || global.display.get_n_monitors() === 0 ||
+        !window.located_on_workspace(global.workspace_manager.get_active_workspace())) {
+      return false;
+    }
+
+    const monitor = global.display.get_monitor_geometry(global.display.get_primary_monitor());
+
+    return this._overStrip(actor, monitor, monitor.y + Main.panel.height + 3);
+  }
+
+  _onWindowChanged(window) {
+    if (this._affectsStrip(window)) {
+      this._updateDelayed();
+    }
+  }
+
+  _onFocusWindow() {
+    // Focus restyles both the window losing it and the one gaining it.
+    // Focus moves nothing, and a header bar's backdrop restyle takes about
+    // as long as a window animation, so a quick sample would only catch it
+    // halfway: take just the settled one.
+    const previous = this._focusWindow;
+    this._focusWindow = global.display.focus_window;
+
+    if (this._affectsStrip(previous) || this._affectsStrip(this._focusWindow)) {
+      this._updateDelayed(400, false);
+    }
   }
 
   _debug(message) {
@@ -1037,6 +1108,10 @@ export default class PanelColorMatcher extends Extension {
     // Note now which samples a window covers, as windows may move before
     // the capture is decoded.
     const covered = this._coveredSamples(monitor, y);
+    // The windows this sample sees, whose changes alone need another.
+    this._stripWindows = new Set(global.get_window_actors()
+      .filter(actor => actor.visible && this._overStrip(actor, monitor, y))
+      .map(actor => actor.meta_window));
 
     this._sampleStrip(monitor.x, y, monitor.width).then(colors => {
       this._sampling = false;
@@ -1076,13 +1151,13 @@ export default class PanelColorMatcher extends Extension {
     });
   }
 
-  _updateDelayed(delay = 400) {
+  _updateDelayed(delay = 400, quick = true) {
     // Sample quickly for a responsive first guess, then again once
     // window animations (about 250 ms) or the wallpaper crossfade have
     // settled. The quick sample isn't postponed by a burst of events.
     // A long delay means a wallpaper crossfade, where a quick sample
     // would catch a half-faded color.
-    if (delay <= 400) {
+    if (quick && delay <= 400) {
       this._quickTimeout ??= GLib.timeout_add(GLib.PRIORITY_DEFAULT, 50, () => {
         this._update(true);
         this._quickTimeout = null;
