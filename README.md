@@ -3,7 +3,10 @@
 [![Downloads](https://img.shields.io/gnome-extensions/dt/panel-color-matcher@otsaloma.io)](https://extensions.gnome.org/extension/9260/panel-color-matcher/)
 
 Panel Color Matcher is a GNOME Shell extension to dynamically change the
-top panel color to match the wallpaper or a maximized window.
+top panel color to match the wallpaper or a maximized window, with a
+range of customization options (opacity, gradient, saturation, text
+contrast and shadow, and accent color syncing) to match anyone's
+preference. Color changes crossfade smoothly instead of snapping.
 
 ## Installing
 
@@ -20,28 +23,27 @@ make install
 
 Activate in the GNOME Extensions app.
 
-## Known Issues
+## Compatibility
 
-This extension uses programmatic single-pixel screenshots to sample
-colors right below the panel. When that color is different than before,
-it is set as an inline style on the panel, which only restyles the panel
-and crossfades to the new color. This works, but has a minor problem.
+Panel Color Matcher works together with [Blur my Shell](https://extensions.gnome.org/extension/3193/blur-my-shell/):
+if its panel blur is enabled, the gradient mask is applied to the blur
+itself so the two blend dynamically instead of fighting each other.
 
-- The color sampling uses more CPU than we'd like. It shouldn't be an
-  issue on any modern multi-core system, but if you have a very
-  low-power system, you might want to avoid this.
+## Known Limitations
+
+- Blur my Shell's **static** panel blur is not yet supported; only its
+  dynamic blur blends properly with the panel's gradient.
 
 ## Screenshots
 
-Color from wallpaper:
-![screenshot](screenshots/screenshot-desktop.png)
+Color from a regular window:
+![screenshot](screenshots/screenshot-window.png)
 
-Light window maximized:
-![screenshot](screenshots/screenshot-light.png)
+Color from a maximized window, with opacity:
+![screenshot](screenshots/screenshot-maximized.png)
 
-Dark window maximized:
-![screenshot](screenshots/screenshot-dark.png)
+Color from a dark wallpaper, with gradient:
+![screenshot](screenshots/screenshot-dark-wallpaper.png)
 
-Any color window maximized:
-![screenshot](screenshots/screenshot-gimp.png)
-![screenshot](screenshots/screenshot-brave.png)
+Color from a dark wallpaper, with gradient turned off:
+![screenshot](screenshots/screenshot-no-gradient.png)
